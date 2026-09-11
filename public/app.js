@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v27'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v28'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -471,6 +471,7 @@ function renderTerm() {
       <button id="jump-live" hidden>⤓ Live</button>
     </div>
     <div id="termbar">
+      <div id="term-suggest" hidden></div>
       <div id="searchrow" ${S.searchOpen ? '' : 'hidden'}>
         <input id="termsearch" placeholder="Search scrollback…" autocapitalize="off" autocorrect="off" value="${esc(S.search)}">
         <button class="btn" id="search-prev" title="Previous hit">▲</button>
@@ -686,6 +687,40 @@ function paintGrid() {
   if (stickBottom) el.scrollTop = el.scrollHeight;
   if (S.search) applySearch();
   syncFieldFromTerminal(true);
+  updateTermSuggest();
+}
+
+// Mirror Claude Code's slash-command dropdown: when the composer shows its
+// suggestion menu (rows under the cursor like "/clear  Clear…"), surface the
+// commands as tappable chips above the input.
+function updateTermSuggest() {
+  const el = $('term-suggest');
+  const ti = $('terminput');
+  if (!el || !ti || !grid || !rowsModel) return;
+  const val = ti.value;
+  const items = [];
+  if (val.startsWith('/') && !val.includes('\n')) {
+    const seen = new Set();
+    const r = grid.cursor.row;
+    for (let i = r + 1; i <= Math.min(grid.rows - 1, r + 12); i += 1) {
+      const t = lineText(rowsModel[grid.scrollbackRows + i] || []);
+      const m = t.match(/^\s*[❯>]?\s*(\/[\w][\w:-]*)(\s|$)/);
+      if (m && !seen.has(m[1])) {
+        seen.add(m[1]);
+        items.push(m[1]);
+        if (items.length >= 8) break;
+      } else if (items.length && !m && t.trim()) break; // menu block ended
+    }
+  }
+  el.hidden = !items.length;
+  el.innerHTML = items.map((c) => `<button data-cmd="${esc(c)}">${esc(c)}</button>`).join('');
+  for (const b of el.querySelectorAll('[data-cmd]')) {
+    b.onclick = () => {
+      ti.value = b.dataset.cmd;
+      diffAndSend(ti.value); // fills the composer too
+      ti.focus();
+    };
+  }
 }
 
 // Back to the bottom + viewport-only live mode; closes history/search state.
@@ -1030,8 +1065,14 @@ function syncSet(ti, text, tailAfterCursor = 0) {
 function bindTermInput() {
   const ti = $('terminput');
   fieldPrev = ti.value || '';
-  // Enter inserts a newline in the textarea (mirrored to the pty as
-  // Meta+Enter); ONLY the ⏎ bar button submits.
+  // Enter inserts a newline; ONLY the ⏎ bar button submits. Exception: on a
+  // slash-command line a newline would make Claude execute it — swallow Enter.
+  ti.addEventListener('beforeinput', (e) => {
+    const type = e.inputType || '';
+    if ((type === 'insertLineBreak' || type === 'insertParagraph') && ti.value.trimStart().startsWith('/')) {
+      e.preventDefault();
+    }
+  });
   ti.addEventListener('input', () => {
     lastLocalInputTs = Date.now();
     ti.style.height = 'auto';
