@@ -140,9 +140,24 @@ async function refreshSnapshot() {
   }
 }
 
+// --------------------------------------------------------------- topology
+async function wsAction(body, confirmMsg) {
+  $('ws-menu').hidden = true;
+  if (confirmMsg && !window.confirm(confirmMsg)) return false;
+  try {
+    await api('/api/ws-action', { method: 'POST', body: JSON.stringify(body) });
+    setTimeout(refreshSnapshot, 700);
+    return true;
+  } catch (err) {
+    alert(`Action failed: ${err.message}`);
+    return false;
+  }
+}
+
 // ------------------------------------------------------------------- render
 function render() {
   clearTimeout(S.termTimer);
+  $('ws-menu').hidden = true;
   document.body.className = S.route.name === 'ws' ? `ws ${S.tab}` : '';
   $('topbar').className = S.route.name === 'ws' ? 'ws' : '';
   $('nav-sessions').classList.toggle('active', S.route.name === 'home');
@@ -200,10 +215,18 @@ function renderHome() {
   }
   const rest = S.snap.workspaces.filter((w) => !grouped.has(w.id));
   html += rest.map(wsRow).join('');
+  html += '<button class="bigbtn secondary" id="new-ws">＋ New workspace</button>';
   $('view').innerHTML = html || '<div class="empty">No workspaces.</div>';
 
   for (const el of $('view').querySelectorAll('[data-ws]')) {
     el.onclick = () => { location.hash = `#/ws/${encodeURIComponent(el.dataset.ws)}`; };
+  }
+  const newWs = $('new-ws');
+  if (newWs) {
+    newWs.onclick = () => {
+      const cwd = window.prompt('Folder for the new workspace:', '~/Documents/dev');
+      if (cwd !== null) wsAction({ action: 'newWorkspace', cwd: cwd.trim() || undefined });
+    };
   }
 }
 
@@ -389,9 +412,11 @@ function renderTerm() {
     <div id="termbar">
       <div id="searchrow" ${S.searchOpen ? '' : 'hidden'}>
         <input id="termsearch" placeholder="Search scrollback…" autocapitalize="off" autocorrect="off" value="${esc(S.search)}">
+        <button class="btn" id="search-prev" title="Previous hit">▲</button>
+        <button class="btn" id="search-next" title="Next hit">▼</button>
         <span id="searchcount"></span>
       </div>
-      <div id="keysbar">${keys}<button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button></div>
+      <div id="keysbar"><button class="btn" id="kb-hide" title="Hide keyboard">⌄⌨</button>${keys}<button class="btn" id="term-attach" title="Attach photo/video">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button></div>
       <input id="terminput" placeholder="⌨ Type here — mirrors the terminal input line"
         autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
     </div>`;
@@ -404,10 +429,24 @@ function renderTerm() {
   }
   $('search-toggle').onclick = toggleSearch;
   $('full-history').onclick = () => (historyMode ? exitHistory() : loadFullHistory());
+  $('kb-hide').onclick = () => document.activeElement?.blur?.();
+  $('term-attach').onclick = () => pickAttachment($('term-attach'), (p) => {
+    const ti = $('terminput');
+    ti.value += `${ti.value && !ti.value.endsWith(' ') ? ' ' : ''}${p} `;
+    ti.dispatchEvent(new Event('input', { bubbles: true })); // diff sends the path to the pty
+  });
   $('termsearch').addEventListener('input', () => {
     S.search = $('termsearch').value;
     applySearch();
   });
+  $('termsearch').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      stepSearch(e.shiftKey ? -1 : 1);
+    }
+  });
+  $('search-prev').onclick = () => stepSearch(-1);
+  $('search-next').onclick = () => stepSearch(1);
   $('jump-live').onclick = () => {
     if (historyMode) exitHistory();
     else if (S.searchOpen) toggleSearch();
@@ -663,23 +702,41 @@ function exitHistory() {
   else exitSnapshot();
 }
 
+let searchHits = [];
+let searchIdx = 0;
+
 function applySearch() {
   const el = $('screen');
   if (!el) return;
   const q = S.search.trim().toLowerCase();
-  let first = null;
-  let count = 0;
+  searchHits = [];
   for (const line of el.querySelectorAll('.tl')) {
     const hit = q && line.textContent.toLowerCase().includes(q);
     line.classList.toggle('hitline', !!hit);
-    if (hit) {
-      count += 1;
-      if (!first) first = line;
-    }
+    line.classList.remove('current');
+    if (hit) searchHits.push(line);
   }
+  searchIdx = 0;
+  focusSearchHit(!!q);
+}
+
+function focusSearchHit(scroll = true) {
   const counter = $('searchcount');
-  if (counter) counter.textContent = q ? `${count} hit${count === 1 ? '' : 's'}` : '';
-  if (first) first.scrollIntoView({ block: 'center' });
+  if (!searchHits.length) {
+    if (counter) counter.textContent = S.search.trim() ? '0' : '';
+    return;
+  }
+  for (const h of searchHits) h.classList.remove('current');
+  const cur = searchHits[searchIdx];
+  cur.classList.add('current');
+  if (scroll) cur.scrollIntoView({ block: 'center' });
+  if (counter) counter.textContent = `${searchIdx + 1}/${searchHits.length}`;
+}
+
+function stepSearch(d) {
+  if (!searchHits.length) return;
+  searchIdx = (searchIdx + d + searchHits.length) % searchHits.length;
+  focusSearchHit();
 }
 
 // Terminal input: the field fills locally (instant echo, zero lag) while every
@@ -902,6 +959,42 @@ function bindTermInput() {
   });
 }
 
+// -------------------------------------------------------------- attachments
+// Photo/video from the phone: uploads to the Mac, then the saved file path is
+// inserted into the prompt so the agent can open it (images are readable by
+// Claude; videos just land on the Mac).
+let attachHandler = null;
+
+function pickAttachment(btn, onPath) {
+  attachHandler = { btn, onPath, label: btn.textContent };
+  $('attach-file').click();
+}
+
+$('attach-file').onchange = async () => {
+  const input = $('attach-file');
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file || !attachHandler) return;
+  const { btn, onPath, label } = attachHandler;
+  attachHandler = null;
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    const r = await fetch(`${BASE}/api/upload?name=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      body: file,
+    });
+    const data = await r.json();
+    if (!r.ok || !data.path) throw new Error(data.error || 'upload failed');
+    onPath(data.path);
+  } catch (err) {
+    alert(`Upload failed: ${err.message}`);
+  } finally {
+    btn.textContent = label;
+    btn.disabled = false;
+  }
+};
+
 // ---------------------------------------------------------------- composer
 function renderSuggestions() {
   const val = $('input').value;
@@ -937,6 +1030,12 @@ async function sendPrompt() {
 }
 
 $('send').onclick = sendPrompt;
+$('chat-attach').onclick = () => pickAttachment($('chat-attach'), (p) => {
+  const el = $('input');
+  el.value += `${el.value && !el.value.endsWith(' ') ? ' ' : ''}${p} `;
+  el.focus();
+  renderSuggestions();
+});
 $('input').addEventListener('input', () => {
   const el = $('input');
   el.style.height = 'auto';
@@ -1112,6 +1211,24 @@ for (const b of $('tabs').querySelectorAll('button')) {
     renderWs();
   };
 }
+
+$('ws-menu-btn').onclick = () => {
+  $('ws-menu').hidden = !$('ws-menu').hidden;
+};
+$('act-newtab').onclick = () => wsAction({ action: 'newTab', workspace_id: ws()?.id });
+$('act-split-r').onclick = () => wsAction({ action: 'split', direction: 'right', workspace_id: ws()?.id, surface_id: S.surface });
+$('act-split-d').onclick = () => wsAction({ action: 'split', direction: 'down', workspace_id: ws()?.id, surface_id: S.surface });
+$('act-closetab').onclick = () => {
+  const w = ws();
+  const cur = w?.surfaces.find((s) => s.id === S.surface);
+  wsAction({ action: 'closeTab', surface_id: S.surface, workspace_id: w?.id }, `Close tab "${cur?.title || 'current'}"?`)
+    .then((ok) => { if (ok) S.surface = null; });
+};
+$('act-closews').onclick = () => {
+  const w = ws();
+  wsAction({ action: 'closeWorkspace', workspace_id: w?.id }, `Close workspace "${w?.title}"? This kills everything running in it.`)
+    .then((ok) => { if (ok) location.hash = '#/'; });
+};
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
 S.route = parseHash();

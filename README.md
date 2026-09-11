@@ -21,6 +21,10 @@ works in any browser.
 - **Web Push notifications**: urgency-mapped pushes that deep-link into the pinging
   session; they arrive even when the phone is off the tailnet. Category toggles in
   Settings.
+- **Attachments**: pick a photo/video on the phone — it uploads to the Mac
+  (`data/uploads/`) and the file path is inserted into the prompt for the agent.
+- **Topology from the phone**: create/close tabs, split panes, create/close
+  workspaces (⋯ menu in a session, ＋ on the home screen).
 - **Settings**: server address (host:port) and notification preferences.
 
 ## Architecture

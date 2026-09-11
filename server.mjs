@@ -10,7 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { rpc, rpcTry, readScreen, sendText, sendKey } from './lib/cmux.mjs';
+import os from 'node:os';
+import { rpc, rpcTry, readScreen, sendText, sendKey, cli } from './lib/cmux.mjs';
 import { CmuxState } from './lib/state.mjs';
 import { resolveTranscript, newestTranscriptForCwd, parseTranscript } from './lib/transcripts.mjs';
 import { PushService } from './lib/push.mjs';
@@ -286,6 +287,54 @@ async function handleApi(req, res, url) {
     } catch (err) {
       return sendJson(res, 502, { error: err.message, fallback: 'keys' });
     }
+  }
+
+  // Topology management from the phone: tabs (surfaces), splits, workspaces.
+  if (req.method === 'POST' && url.pathname === '/api/ws-action') {
+    const { action, workspace_id, surface_id, direction, cwd } = JSON.parse(await readBody(req));
+    const home = os.homedir();
+    const actions = {
+      newTab: () => workspace_id && ['new-surface', '--workspace', workspace_id, '--focus', 'false'],
+      split: () => workspace_id && ['new-split', direction === 'down' ? 'down' : 'right',
+        '--workspace', workspace_id, ...(surface_id ? ['--surface', surface_id] : []), '--focus', 'false'],
+      closeTab: () => surface_id && ['close-surface', '--surface', surface_id,
+        ...(workspace_id ? ['--workspace', workspace_id] : [])],
+      closeWorkspace: () => workspace_id && ['close-workspace', '--workspace', workspace_id],
+      newWorkspace: () => ['new-workspace', '--focus', 'false',
+        ...(cwd ? ['--cwd', String(cwd).replace(/^~(?=\/|$)/, home)] : [])],
+    };
+    const args = actions[action]?.();
+    if (!args) return sendJson(res, 400, { error: 'unknown action or missing target' });
+    const out = await cli(args);
+    await state.refresh().catch(() => {});
+    return sendJson(res, 200, { ok: true, out: out.trim().slice(0, 200) });
+  }
+
+  // Photo/video from the phone: raw body → file on the Mac; the client then
+  // inserts the saved path into the prompt so the agent can read it.
+  if (req.method === 'POST' && url.pathname === '/api/upload') {
+    const name = String(q.get('name') || 'upload.bin').replace(/[^\w.\-]+/g, '_').slice(-80);
+    const dir = path.join(DATA_DIR, 'uploads');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${Date.now()}-${name}`);
+    const MAX = 300 * 1024 * 1024;
+    let size = 0;
+    const stream = fs.createWriteStream(file);
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX) {
+        stream.destroy();
+        fs.unlink(file, () => {});
+        req.destroy();
+      }
+    });
+    req.pipe(stream);
+    await new Promise((resolve, reject) => {
+      stream.on('finish', resolve);
+      stream.on('error', reject);
+      req.on('error', reject);
+    });
+    return sendJson(res, 200, { ok: true, path: file, size });
   }
 
   // ------------------------------------------------------------- push (existing)

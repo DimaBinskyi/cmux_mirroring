@@ -63,6 +63,15 @@
     #topbar.ws #tabs { display: flex; }
     #tabs button { padding: 5px 14px; border-radius: 8px; color: var(--muted); font-weight: 600; font-size: 13px; }
     #tabs button.active { background: var(--accent); color: var(--accent-text); }
+    #ws-menu-btn { display: none; font-size: 20px; padding: 2px 6px 6px; color: var(--muted); }
+    #topbar.ws #ws-menu-btn { display: block; }
+    #ws-menu {
+      position: absolute; right: 10px; top: calc(env(safe-area-inset-top) + 48px); z-index: 30;
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.5); overflow: hidden; min-width: 210px;
+    }
+    #ws-menu button { display: block; width: 100%; text-align: left; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
+    #ws-menu button:last-child { border-bottom: 0; color: var(--err); }
 
     /* main area */
     #view { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 12px; min-height: 0; }
@@ -148,6 +157,7 @@
     }
     #send { background: var(--accent); color: var(--accent-text); border-radius: 10px; padding: 9px 15px; font-weight: 700; }
     #send:disabled { opacity: 0.4; }
+    #chat-attach { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
 
     /* terminal */
     #term-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
@@ -159,6 +169,7 @@
     }
     #screen .tl { white-space: pre; min-height: 1.35em; }
     #screen .tl.hitline { background: rgba(245, 158, 11, 0.28); border-radius: 3px; }
+    #screen .tl.hitline.current { outline: 2px solid var(--warn); outline-offset: -1px; background: rgba(245, 158, 11, 0.45); }
     #jump-live {
       position: absolute; right: 12px; bottom: 12px;
       background: var(--accent); color: var(--accent-text); font-weight: 700; font-size: 13px;
@@ -216,17 +227,28 @@
       <button data-tab="term">Term</button>
       <button data-tab="chat">Chat</button>
     </div>
+    <button id="ws-menu-btn">⋯</button>
   </header>
+
+  <div id="ws-menu" hidden>
+    <button id="act-newtab">➕ New tab</button>
+    <button id="act-split-r">⬌ Split right</button>
+    <button id="act-split-d">⬍ Split down</button>
+    <button id="act-closetab">✕ Close current tab</button>
+    <button id="act-closews">🗑 Close workspace</button>
+  </div>
 
   <main id="view"></main>
 
   <div id="composer">
     <div id="suggest"></div>
     <div class="row">
+      <button id="chat-attach" title="Attach photo/video">📎</button>
       <textarea id="input" rows="1" placeholder="Reply to agent…"></textarea>
       <button id="send">➤</button>
     </div>
   </div>
+  <input type="file" id="attach-file" accept="image/*,video/*" hidden>
 
   <nav id="bottomnav">
     <button data-route="#/" id="nav-sessions">Sessions</button>
