@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v29'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v30'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1395,9 +1395,17 @@ if (window.visualViewport) {
       document.body.style.height = `${Math.round(vv.height)}px`;
       document.body.style.top = `${Math.round(vv.offsetTop)}px`;
     } else {
-      // keyboard closed: trust CSS 100dvh — JS-measured heights proved
-      // unreliable in standalone mode (left a dead strip at the bottom)
-      document.body.style.height = '';
+      // Keyboard closed. iOS standalone can report the viewport short by
+      // exactly the status bar (measured on-device: win/vv/dvh 873 vs screen
+      // 932) while painting full-bleed — compensate to the real screen height.
+      const short = window.screen.height - window.innerHeight;
+      const standalone = window.navigator.standalone === true
+        || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+      if (standalone && short > 40 && short < 120) {
+        document.body.style.height = `${window.screen.height}px`;
+      } else {
+        document.body.style.height = ''; // CSS 100dvh
+      }
       document.body.style.top = '0px';
     }
     document.body.classList.toggle('kb-open', kb);
@@ -1415,11 +1423,9 @@ if (window.visualViewport) {
   window.addEventListener('focusout', fitViewport);
   fitViewport();
   // Watchdog: iOS occasionally swallows the resize event after keyboard
-  // close — self-heal when the applied state doesn't match reality.
+  // close — re-apply periodically; apply() is idempotent.
   setInterval(() => {
-    const kb = kbOpen();
-    const applied = document.body.style.height;
-    if ((!kb && applied) || (kb && Math.abs(parseFloat(applied || '0') - vv.height) > 2)) fitViewport();
+    if (kbOpen() !== document.body.classList.contains('kb-open')) fitViewport();
   }, 2000);
 }
 
