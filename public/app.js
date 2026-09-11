@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v32'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v33'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1419,17 +1419,10 @@ if (window.visualViewport) {
       document.body.style.height = `${Math.round(vv.height)}px`;
       document.body.style.top = `${Math.round(vv.offsetTop)}px`;
     } else {
-      // Keyboard closed. iOS standalone can report the viewport short by
-      // exactly the status bar (measured on-device: win/vv/dvh 873 vs screen
-      // 932) while painting full-bleed — compensate to the real screen height.
-      const short = window.screen.height - window.innerHeight;
-      const standalone = window.navigator.standalone === true
-        || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
-      if (standalone && short > 40 && short < 120) {
-        document.body.style.height = `${window.screen.height}px`;
-      } else {
-        document.body.style.height = ''; // CSS 100dvh
-      }
+      // Keyboard closed: fill the web view exactly (CSS 100dvh). Forcing
+      // screen.height pushed the bottom bars outside the view — the view
+      // really is shorter than the screen in this install (see README note).
+      document.body.style.height = '';
       document.body.style.top = '0px';
     }
     document.body.classList.toggle('kb-open', kb);

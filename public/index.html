@@ -27,9 +27,12 @@
       --err: #f87171;
       --blue: #1d4ed8;
       --safe-top: env(safe-area-inset-top);
-      --safe-bottom: env(safe-area-inset-bottom);
+      /* The web view in this install already ends above the home indicator,
+         so reserving inset space again would only add a dead strip. */
+      --safe-bottom: 0px;
       --sab: env(safe-area-inset-bottom); /* readable from JS for layout debug */
     }
+    html { background: var(--bg); }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { height: 100%; }
     body {
@@ -116,7 +119,7 @@
       backdrop-filter: blur(10px);
       padding-bottom: var(--safe-bottom);
     }
-    #bottomnav button { flex: 1; padding: 10px 0 8px; color: var(--dim); font-weight: 600; font-size: 13px; }
+    #bottomnav button { flex: 1; padding: 10px 0 10px; color: var(--dim); font-weight: 600; font-size: 13px; }
     #bottomnav button.active { color: var(--accent); }
     #bottomnav .badge { background: var(--warn); color: #000; border-radius: 8px; padding: 0 6px; font-size: 10px; margin-left: 4px; }
     body.ws #bottomnav { display: none; }
