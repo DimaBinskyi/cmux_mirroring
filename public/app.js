@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v28'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v29'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -220,6 +220,7 @@ function renderHome() {
   const rest = S.snap.workspaces.filter((w) => !grouped.has(w.id));
   html += rest.map(wsRow).join('');
   html += '<button class="bigbtn secondary" id="new-ws">＋ New workspace</button>';
+  html += `<div class="note">app ${APP_VERSION} · win ${window.innerHeight} · vv ${Math.round(window.visualViewport?.height || 0)} · body ${document.body.style.height || 'css-dvh'} · screen ${window.screen.height}</div>`;
   $('view').innerHTML = html || '<div class="empty">No workspaces.</div>';
 
   for (const el of $('view').querySelectorAll('[data-ws]')) {
@@ -1386,12 +1387,19 @@ if (window.visualViewport) {
   // the home-indicator strip → the reported bottom gap). Keyboard open: track
   // the visual viewport so the bars ride above the keyboard.
   const kbOpen = () => vv.height < Math.max(window.innerHeight, maxH) - 100;
-  const targetH = () => Math.round(kbOpen() ? vv.height : Math.max(vv.height, window.innerHeight));
   const apply = () => {
     maxH = Math.max(maxH, vv.height);
     const kb = kbOpen();
-    document.body.style.height = `${targetH()}px`;
-    document.body.style.top = `${Math.round(kb ? vv.offsetTop : 0)}px`;
+    if (kb) {
+      // keyboard: size to the visible area so the bars ride above it
+      document.body.style.height = `${Math.round(vv.height)}px`;
+      document.body.style.top = `${Math.round(vv.offsetTop)}px`;
+    } else {
+      // keyboard closed: trust CSS 100dvh — JS-measured heights proved
+      // unreliable in standalone mode (left a dead strip at the bottom)
+      document.body.style.height = '';
+      document.body.style.top = '0px';
+    }
     document.body.classList.toggle('kb-open', kb);
     window.scrollTo(0, 0);
   };
@@ -1407,9 +1415,11 @@ if (window.visualViewport) {
   window.addEventListener('focusout', fitViewport);
   fitViewport();
   // Watchdog: iOS occasionally swallows the resize event after keyboard
-  // close — self-heal whenever the applied height drifts from reality.
+  // close — self-heal when the applied state doesn't match reality.
   setInterval(() => {
-    if (Math.abs(parseFloat(document.body.style.height || '0') - targetH()) > 2) fitViewport();
+    const kb = kbOpen();
+    const applied = document.body.style.height;
+    if ((!kb && applied) || (kb && Math.abs(parseFloat(applied || '0') - vv.height) > 2)) fitViewport();
   }, 2000);
 }
 
