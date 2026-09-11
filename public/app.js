@@ -743,6 +743,7 @@ async function submitLine() {
   await specialKey('enter');
   const ti = $('terminput');
   if (ti) ti.value = '';
+  fieldPrev = '';
 }
 
 // Mirror the terminal's current input line into the field.
@@ -753,7 +754,10 @@ async function submitLine() {
 //    the input is the trailing run of plainly-styled spans on the cursor row.
 // auto=true runs on every repaint (mirrors Mac-side typing / recalls) but
 // backs off while the user is typing into the field or a flush is pending.
+let fieldPrev = ''; // the input-line text the pty currently agrees with
+
 function setField(ti, text) {
+  fieldPrev = text; // terminal is the source here — reset the diff baseline
   if (ti.value === text) return;
   ti.value = text;
   try {
@@ -761,6 +765,21 @@ function setField(ti, text) {
   } catch {
     /* not focused */
   }
+}
+
+// Turn any field edit (word-delete, selection replace, paste, autocorrect…)
+// into the minimal pty edit: erase back to the common prefix with DEL bytes,
+// then retype the changed tail. Assumes the pty cursor sits at end of line.
+function diffAndSend(newValue) {
+  const oldCp = [...fieldPrev];
+  const newCp = [...newValue];
+  let p = 0;
+  while (p < oldCp.length && p < newCp.length && oldCp[p] === newCp[p]) p += 1;
+  const erase = oldCp.length - p;
+  const add = newCp.slice(p).join('');
+  fieldPrev = newValue;
+  if (!erase && !add) return;
+  queueOp('text', '\u007F'.repeat(erase) + add);
 }
 
 function syncFieldFromTerminal(auto = false) {
@@ -774,7 +793,8 @@ function syncFieldFromTerminal(auto = false) {
 
   // Viewport rows live at the tail of rowsModel (after deltas, grid.viewport
   // itself is stale — rowsModel is the source of truth).
-  const vrow = (r) => rowsModel[grid.scrollbackRows + r] || [];
+  const isFaint = (s) => (grid.styles[s.style_id] || {}).faint;
+  const vrow = (r) => (rowsModel[grid.scrollbackRows + r] || []).filter((s) => !isFaint(s)); // faint = placeholders/hints, never input
   const rowText = (r) => lineText(vrow(r));
   const r = grid.cursor.row;
 
@@ -791,11 +811,19 @@ function syncFieldFromTerminal(auto = false) {
     if (i !== r && !/^\s/.test(t)) break;
   }
   if (startRow >= 0) {
+    // Preserve internal/trailing spaces exactly — the field must match the pty
+    // byte-for-byte or the edit diffing sends garbage. Terminal wraps at exact
+    // column width, so wrapped rows join with no separator; the composer's
+    // 2-space continuation indent is a rendering artifact and is stripped.
     const parts = [];
     for (let i = startRow; i <= r; i += 1) {
-      parts.push(rowText(i).replace(/\s+$/, '').replace(i === startRow ? /^\s*❯\s?/ : /^\s+/, ''));
+      let t = rowText(i);
+      if (i === startRow) t = t.replace(/^\s*❯\s?/, '');
+      else t = t.replace(/^\s{1,2}/, '');
+      if (i < r) t = t.replace(/\s+$/, ' '); // wrap point: at most one space survives
+      parts.push(t);
     }
-    setField(ti, parts.join(' ').replace(/\s+/g, ' ').trim());
+    syncSet(ti, parts.join(''));
     return;
   }
   if (auto) {
@@ -822,26 +850,36 @@ function syncFieldFromTerminal(auto = false) {
   if (start === spans.length) return; // no plain tail — leave the field alone
   const text = lineText(spans.slice(start))
     .replace(/^\s+/, '')
-    .replace(/\s+$/, '')
     .replace(/^[❯>$%#]\s?/, '')
     .replace(/\s*│\s*$/, '');
-  setField(ti, text);
+  syncSet(ti, text);
+}
+
+// Erasing repaints old cells as spaces, so grid lines carry phantom trailing
+// whitespace we can't tell apart from a real typed trailing space. Sync
+// ignores trailing whitespace: if field and terminal agree modulo it, leave
+// the field alone; otherwise write the trimmed version.
+function syncSet(ti, text) {
+  const bare = (x) => x.replace(/\s+$/, '');
+  if (bare(text) === bare(ti.value)) return;
+  setField(ti, bare(text));
 }
 
 function bindTermInput() {
   const ti = $('terminput');
+  fieldPrev = ti.value || '';
   ti.addEventListener('beforeinput', (e) => {
     lastLocalInputTs = Date.now();
     const type = e.inputType || '';
     if (type === 'insertLineBreak' || type === 'insertParagraph') {
       e.preventDefault();
       submitLine();
-    } else if (type === 'deleteContentBackward' || type.startsWith('delete')) {
-      queueOp('key', 'backspace'); // the field deletes locally on its own
-    } else if (type.startsWith('insert')) {
-      const data = e.data ?? e.dataTransfer?.getData('text') ?? '';
-      if (data) queueOp('text', data); // the field fills locally on its own
     }
+    // all other edits land in the 'input' event below and get diffed
+  });
+  ti.addEventListener('input', () => {
+    lastLocalInputTs = Date.now();
+    diffAndSend(ti.value);
   });
   ti.addEventListener('keydown', (e) => {
     lastLocalInputTs = Date.now();
