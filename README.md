@@ -47,29 +47,53 @@ iPhone PWA (installed from Safari)
 
 No build step, no framework, one dependency (`web-push`). See `docs/DESIGN.md`.
 
-## Setup
+## Fresh setup — everything a brand-new Mac + phone needs
 
-1. `npm install`
-2. `node scripts/gen-icons.mjs` (once, generates the PWA icons)
-3. Run it: `node server.mjs` — or install the launchd agent so it survives reboots
-   (see `com.dmytro.cmux-mirroring.plist` for a template; adjust paths).
-4. HTTPS on your tailnet: enable Serve/HTTPS for the tailnet once (Tailscale admin
-   console), then `tailscale serve --bg 4488`.
+Prerequisites on the Mac:
 
-## Install on the iPhone
+- [cmux](https://cmux.io) installed and running (the server talks to its control
+  socket at `~/.local/state/cmux/cmux.sock`; the socket password is read
+  automatically from `~/.local/state/cmux/socket-control-password`).
+- Node.js 20+.
+- [Tailscale](https://tailscale.com) (free tier is fine), signed in.
 
-Two ways (Tailscale connected on the phone):
+Prerequisites on the phone:
 
-- **Full install with push (recommended)** — needs the HTTPS step above:
-  open `https://<mac-name>.<tailnet>.ts.net` in Safari → Share →
-  **Add to Home Screen** → open from the icon → Settings →
-  **Enable notifications** → **Send test push**. iOS only grants Web Push to
-  home-screen apps installed from an HTTPS origin.
-- **Quick look without push**: open `http://<mac-tailscale-ip>:4488` in Safari.
-  The full live UI works (terminal, chat, tabs); push and offline caching do
-  not — iOS requires a secure origin for service workers.
+- iPhone with iOS 16.4+ (Web Push requirement).
+- Tailscale app, signed in to the **same tailnet** as the Mac.
 
-To feed cmux notifications to the phone, POST them from a notification hook:
+Steps on the Mac:
+
+1. `git clone https://github.com/DimaBinskyi/cmux_mirroring && cd cmux_mirroring`
+2. `npm install && node scripts/gen-icons.mjs`
+3. Start it: `node server.mjs` — you should see
+   `cmux mirroring listening on http://127.0.0.1:4488`.
+   For a permanent install, copy `com.dmytro.cmux-mirroring.plist` to
+   `~/Library/LaunchAgents/`, fix the node and repo paths inside, then
+   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dmytro.cmux-mirroring.plist`.
+4. HTTPS on the tailnet (one-time): in the Tailscale admin console enable
+   **MagicDNS** and **HTTPS certificates** (running `tailscale serve` prints the
+   exact enable link if they're off), then:
+   `tailscale serve --bg 4488`
+   Your app is now at `https://<mac-name>.<tailnet>.ts.net`, tailnet-only.
+5. Optional environment overrides (set in the launchd plist or shell):
+   | Variable | Default | Purpose |
+   |---|---|---|
+   | `PORT` | `4488` | HTTP port the server binds |
+   | `HOST` | `127.0.0.1` | Bind address (keep loopback; Serve does HTTPS) |
+   | `VAPID_SUBJECT` | repo URL | Push-sender contact (https: or mailto:) |
+   | `CMUX_BIN` | app bundle path | cmux CLI binary |
+   | `CMUX_SOCKET_PATH` | `~/.local/state/cmux/cmux.sock` | control socket |
+   | `CMUX_SOCKET_PASSWORD` | read from password file | socket auth |
+
+Steps on the phone:
+
+1. Safari → `https://<mac-name>.<tailnet>.ts.net` → Share → **Add to Home Screen**.
+2. Open from the icon (iOS only grants Web Push to installed home-screen apps).
+3. Settings tab → **Enable notifications** → Allow → **Send test push**.
+
+Feeding notifications: anything on the Mac can push to every subscribed phone by
+POSTing to the local API (wire it from a cmux/Claude Code notification hook):
 
 ```bash
 curl -m 5 -H 'Content-Type: application/json' \
@@ -77,11 +101,25 @@ curl -m 5 -H 'Content-Type: application/json' \
   http://127.0.0.1:4488/api/notify
 ```
 
+Titles containing 🚨/⚠️/✅ map to the notification categories that can be muted
+per-category in Settings; everything else is treated as silent background info.
+
+## Updating
+
+- **Phone: self-updating.** The app fetches fresh code every launch (network-first
+  service worker, `no-cache` static files) — open it and you're on the latest
+  version; no reinstall. Only if the manifest identity changes (app name/icons)
+  do you need to re-add the icon.
+- **Mac:** `git pull && npm install` then restart the server:
+  `launchctl kickstart -k gui/$(id -u)/com.dmytro.cmux-mirroring`
+  (or restart your `node server.mjs`).
+
 ## Notes
 
 - The server binds to 127.0.0.1 only; Tailscale Serve terminates HTTPS and proxies
-  to it, so exposure is tailnet-only.
+  to it, so exposure is tailnet-only. There is no auth of its own — anyone on your
+  tailnet can control your terminals, so keep the tailnet personal.
 - VAPID keys are generated on first start into `data/` (gitignored), along with
-  push subscriptions, notification history, and preferences.
+  push subscriptions, notification history, preferences, and uploads.
 - Colored scrollback is limited to what cmux's render grid retains (~240 rows);
   the "▲ All" view loads up to 10k lines of plain-text history.

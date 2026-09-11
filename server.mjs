@@ -19,9 +19,10 @@ import { PushService } from './lib/push.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DATA_DIR = path.join(__dirname, 'data');
-const HOST = '127.0.0.1';
-const PORT = 4488;
-const VAPID_SUBJECT = 'https://macbook-air-dmytro-work.tail4f72b4.ts.net';
+const HOST = process.env.HOST || '127.0.0.1';
+const PORT = Number(process.env.PORT) || 4488;
+// VAPID subject identifies the push sender to Apple/Google (https: or mailto:)
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'https://github.com/DimaBinskyi/cmux_mirroring';
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 

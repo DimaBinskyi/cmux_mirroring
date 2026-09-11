@@ -33,6 +33,9 @@
     html, body { height: 100%; }
     body {
       margin: 0;
+      /* dvh tracks iOS Safari's collapsing toolbars — keeps the bottom nav and
+         the terminal bar pinned to the actually-visible bottom edge */
+      height: 100dvh;
       background: var(--bg);
       color: var(--text);
       font: 15px/1.45 -apple-system, system-ui, sans-serif;
@@ -203,8 +206,8 @@
     #searchrow[hidden] { display: none; }
     #termsearch { flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; font-size: 13px; padding: 7px 10px; }
     #searchcount { color: var(--muted); font-size: 12px; min-width: 40px; text-align: right; }
-    #keysbar { display: flex; gap: 5px; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
-    #keysbar .btn { flex: none; padding: 7px 12px; font-family: ui-monospace, monospace; font-size: 13px; }
+    #keysbar { display: flex; gap: 5px; flex-wrap: wrap; padding-bottom: 2px; }
+    #keysbar .btn { flex: 1 0 auto; text-align: center; padding: 7px 10px; font-family: ui-monospace, monospace; font-size: 13px; }
     #terminput {
       width: 100%; margin-top: 6px;
       background: #000; border: 1px solid var(--border); border-radius: 8px;
