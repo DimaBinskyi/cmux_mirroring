@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v31'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v32'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -178,6 +178,7 @@ function render() {
     renderWs();
   }
   updateNavBadge();
+  if (typeof reportWatching === 'function') reportWatching();
 }
 
 function updateNavBadge() {
@@ -1451,6 +1452,24 @@ if (window.visualViewport) {
     if (kbOpen() !== document.body.classList.contains('kb-open')) fitViewport();
   }, 2000);
 }
+
+// Tell the server which session this phone is actively viewing (foreground
+// only) so its pushes are suppressed — you're already looking at it.
+const CLIENT_ID = Math.random().toString(36).slice(2);
+let lastWatchReported;
+
+function reportWatching() {
+  const wsId = S.route.name === 'ws' && document.visibilityState === 'visible' ? (ws()?.id || null) : null;
+  api('/api/watching', { method: 'POST', body: JSON.stringify({ client: CLIENT_ID, workspace_id: wsId }) })
+    .catch(() => {});
+  lastWatchReported = wsId;
+}
+
+setInterval(() => {
+  // heartbeat keeps the watch alive; server expires stale ones in 25s
+  if (lastWatchReported && document.visibilityState === 'visible') reportWatching();
+}, 10_000);
+document.addEventListener('visibilitychange', reportWatching);
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js');

@@ -29,6 +29,18 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const push = new PushService(DATA_DIR, VAPID_SUBJECT);
 const state = new CmuxState(path.join(DATA_DIR, 'events-cursor'), (msg) => console.error(msg));
 const gridCache = new Map(); // surface id -> {seq, keys[]} for /api/grid deltas
+const watchers = new Map(); // client id -> {wsId, ts} — sessions actively viewed on a phone
+const WATCH_TTL = 25_000;
+
+function isBeingViewed(wsId) {
+  if (!wsId) return false;
+  const now = Date.now();
+  for (const [client, w] of watchers) {
+    if (now - w.ts > WATCH_TTL) watchers.delete(client);
+    else if (w.wsId === wsId) return true;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------- SSE clients
 const sseClients = new Set();
@@ -360,13 +372,25 @@ async function handleApi(req, res, url) {
     const { endpoint } = JSON.parse(await readBody(req));
     return sendJson(res, 200, { ok: true, subscriptions: push.unsubscribe(endpoint) });
   }
+  // The phone reports which session it's actively viewing (foreground only);
+  // pushes for that session are suppressed — the user is already looking at it.
+  if (req.method === 'POST' && url.pathname === '/api/watching') {
+    const { client, workspace_id } = JSON.parse(await readBody(req));
+    if (client) {
+      if (workspace_id) watchers.set(String(client), { wsId: String(workspace_id), ts: Date.now() });
+      else watchers.delete(String(client));
+    }
+    return sendJson(res, 200, { ok: true });
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/notify') {
     const raw = JSON.parse(await readBody(req));
     const category = notifyCategory(String(raw.title || ''));
     const enabled = prefs.notify[category] !== false;
-    const result = await push.notify(raw, { broadcast: enabled });
+    const viewing = isBeingViewed(raw.tag ? String(raw.tag) : null);
+    const result = await push.notify(raw, { broadcast: enabled && !viewing });
     broadcast('push', { item: push.feed[0] });
-    return sendJson(res, 200, { ok: true, category, skipped: !enabled, ...result });
+    return sendJson(res, 200, { ok: true, category, skipped: !enabled, viewing, ...result });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/prefs') {
