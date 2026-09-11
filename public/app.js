@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v25'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v26'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -584,7 +584,12 @@ async function pollGrid(force) {
     const full = !stickBottom;
     const since = grid && rowsModel && lastFullMode === full ? `&since=${encodeURIComponent(grid.seq)}` : '';
     const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${full ? '&full=1' : ''}${since}`);
-    if (g.unchanged) return;
+    if (g.unchanged) {
+      // Fresh view (e.g. after a tab switch) with an unchanged revision:
+      // repaint from the cached model or the screen stays blank forever.
+      if (prevLines === null && rowsModel) paintGrid();
+      return;
+    }
     lastGridChangeTs = Date.now();
     if (g.delta && grid && rowsModel && lastFullMode === full) {
       grid.seq = g.seq;
@@ -1006,12 +1011,19 @@ function syncSet(ti, text, tailAfterCursor = 0) {
   if (ti.value.includes('\n')) return; // multi-line draft in progress — don't flatten it
   const bare = (x) => x.replace(/\s+$/, '');
   const t = bare(text);
-  ptyCaret = Math.max(0, [...t].length - tailAfterCursor);
-  if (t !== bare(ti.value)) setField(ti, t);
-  try {
-    ti.setSelectionRange(ptyCaret, ptyCaret);
-  } catch {
-    /* not focused */
+  if (t !== bare(ti.value)) {
+    setField(ti, t);
+    ptyCaret = Math.max(0, [...t].length - tailAfterCursor);
+    try {
+      ti.setSelectionRange(ptyCaret, ptyCaret);
+    } catch {
+      /* not focused */
+    }
+  } else {
+    // Equal modulo trailing spaces: the field is authoritative (it may hold a
+    // real trailing space the grid can't distinguish from erase artifacts) —
+    // update the caret estimate from the field and DON'T move the user's caret.
+    ptyCaret = Math.max(0, [...ti.value].length - tailAfterCursor);
   }
 }
 
@@ -1203,6 +1215,7 @@ async function renderSettings() {
         autocapitalize="off" autocorrect="off" spellcheck="false">
       <button class="bigbtn" id="srv-save">Save &amp; test</button>
       <div class="cfg-result" id="srv-result">${srv ? `connected ✓ · cmux ${srv.cmuxOnline ? 'online' : 'offline'} · ${srv.subscriptions} device(s) subscribed · up ${Math.round(srv.uptimeSec / 60)}m` : 'not connected'} · app ${APP_VERSION}</div>
+      <div class="muted" style="margin-top:4px">layout: window ${window.innerHeight} · visual ${Math.round(window.visualViewport?.height || 0)} · body ${document.body.style.height || 'auto'} · safe-b ${getComputedStyle(document.documentElement).getPropertyValue('--sab') || 'n/a'}</div>
     </div>
 
     <div class="card">
