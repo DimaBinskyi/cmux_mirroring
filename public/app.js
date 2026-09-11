@@ -932,9 +932,9 @@ function diffAndSend(newValue) {
   const delta = target - ptyCaret;
   const RIGHT = '\u001B[C';
   const LEFT = '\u001B[D';
-  // Newlines go out as Meta+Enter (ESC CR): a line break in the Claude
-  // composer instead of a submit. A plain \n would submit the prompt.
-  const insertedPty = inserted.replace(/\n/g, '\u001B\r');
+  // Newlines go out as backslash+CR — the documented Claude Code line-break
+  // (zsh treats it as line continuation too). ESC+CR or plain \n would submit.
+  const insertedPty = inserted.replace(/\n/g, '\\\r');
   const ops = (delta > 0 ? RIGHT.repeat(delta) : LEFT.repeat(-delta))
     + '\u007F'.repeat(removed)
     + insertedPty;
@@ -1348,13 +1348,27 @@ $('switcher').onclick = (e) => {
 // the terminal bar and bottom nav stay glued to the visible bottom edge.
 if (window.visualViewport) {
   const vv = window.visualViewport;
-  const fitViewport = () => {
+  let maxH = vv.height;
+  let settleTimers = [];
+  const apply = () => {
+    maxH = Math.max(maxH, vv.height);
     document.body.style.height = `${Math.round(vv.height)}px`;
     document.body.style.top = `${Math.round(vv.offsetTop)}px`;
+    // keyboard open → it covers the home-indicator area, so drop the
+    // safe-area padding that would otherwise leave a dead gap
+    document.body.classList.toggle('kb-open', vv.height < maxH - 100);
     window.scrollTo(0, 0);
+  };
+  const fitViewport = () => {
+    apply();
+    // iOS fires resize mid-animation; re-apply after it settles
+    for (const t of settleTimers) clearTimeout(t);
+    settleTimers = [250, 600].map((ms) => setTimeout(apply, ms));
   };
   vv.addEventListener('resize', fitViewport);
   vv.addEventListener('scroll', fitViewport);
+  window.addEventListener('focusin', fitViewport);
+  window.addEventListener('focusout', fitViewport);
   fitViewport();
 }
 

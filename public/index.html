@@ -120,6 +120,11 @@
     #bottomnav .badge { background: var(--warn); color: #000; border-radius: 8px; padding: 0 6px; font-size: 10px; margin-left: 4px; }
     body.ws #bottomnav { display: none; }
 
+    /* keyboard open: it covers the home indicator, reclaim the safe-area gaps */
+    body.kb-open #bottomnav { padding-bottom: 0; }
+    body.kb-open #composer { padding-bottom: 8px; }
+    body.kb-open.ws.term #view { padding-bottom: 4px; }
+
     /* home list */
     .ws-row {
       display: flex;
