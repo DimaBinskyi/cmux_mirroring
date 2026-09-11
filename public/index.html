@@ -33,9 +33,13 @@
     html, body { height: 100%; }
     body {
       margin: 0;
-      /* dvh tracks iOS Safari's collapsing toolbars — keeps the bottom nav and
-         the terminal bar pinned to the actually-visible bottom edge */
-      height: 100dvh;
+      /* position:fixed stops iOS document scroll/bounce entirely; height is
+         driven by the visualViewport script below so the bottom bars stay
+         pinned to the visible edge and ride ABOVE the keyboard when it opens */
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100dvh; /* fallback until the script runs */
       background: var(--bg);
       color: var(--text);
       font: 15px/1.45 -apple-system, system-ui, sans-serif;

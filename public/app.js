@@ -1343,6 +1343,21 @@ $('switcher').onclick = (e) => {
   if (e.target === $('switcher')) $('switcher').hidden = true; // tap backdrop closes
 };
 
+// Pin the app shell to the visible viewport: iOS overlays the keyboard instead
+// of resizing the layout, so we resize the (position:fixed) body ourselves —
+// the terminal bar and bottom nav stay glued to the visible bottom edge.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const fitViewport = () => {
+    document.body.style.height = `${Math.round(vv.height)}px`;
+    document.body.style.top = `${Math.round(vv.offsetTop)}px`;
+    window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', fitViewport);
+  vv.addEventListener('scroll', fitViewport);
+  fitViewport();
+}
+
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
 S.route = parseHash();
 refreshSnapshot().then(() => {
