@@ -20,7 +20,7 @@ iPhone PWA (installed from Safari)
 ```
 
 - `tailscale serve --bg 4488` terminates HTTPS at
-  `https://macbook-air-dmytro-work.tail4f72b4.ts.net`; server binds 127.0.0.1 only.
+  `https://<mac-name>.<tailnet>.ts.net`; server binds 127.0.0.1 only.
 - Live updates: SSE (`/api/stream`), not WebSocket — one direction is enough, and
   EventSource reconnects for free after iOS suspends the app. Actions are plain POSTs.
 - Workspace ↔ Claude session mapping comes from cmux `agent.hook.*` events, which carry

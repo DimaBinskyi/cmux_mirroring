@@ -1,6 +1,8 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
+const APP_VERSION = 'v24'; // keep in sync with sw.js CACHE
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -1224,7 +1226,7 @@ async function renderSettings() {
       <input class="cfg-input" id="srv-addr" placeholder="e.g. http://100.81.107.15:4488" value="${esc(BASE)}"
         autocapitalize="off" autocorrect="off" spellcheck="false">
       <button class="bigbtn" id="srv-save">Save &amp; test</button>
-      <div class="cfg-result" id="srv-result">${srv ? `connected ✓ · cmux ${srv.cmuxOnline ? 'online' : 'offline'} · ${srv.subscriptions} device(s) subscribed · up ${Math.round(srv.uptimeSec / 60)}m` : 'not connected'}</div>
+      <div class="cfg-result" id="srv-result">${srv ? `connected ✓ · cmux ${srv.cmuxOnline ? 'online' : 'offline'} · ${srv.subscriptions} device(s) subscribed · up ${Math.round(srv.uptimeSec / 60)}m` : 'not connected'} · app ${APP_VERSION}</div>
     </div>
 
     <div class="card">
@@ -1370,6 +1372,11 @@ if (window.visualViewport) {
   window.addEventListener('focusin', fitViewport);
   window.addEventListener('focusout', fitViewport);
   fitViewport();
+  // Watchdog: iOS occasionally swallows the resize event after keyboard
+  // close — self-heal whenever the applied height drifts from reality.
+  setInterval(() => {
+    if (Math.abs(parseFloat(document.body.style.height || '0') - vv.height) > 2) fitViewport();
+  }, 2000);
 }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');

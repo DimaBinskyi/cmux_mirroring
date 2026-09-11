@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- launchd template: replace /path/to/node and /path/to/cmux_mirroring,
+     save as ~/Library/LaunchAgents/com.cmux-mirroring.plist, then:
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-mirroring.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cmux-mirroring</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/node</string>
+    <string>/path/to/cmux_mirroring/server.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/path/to/cmux_mirroring</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/path/to/cmux_mirroring/data/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/path/to/cmux_mirroring/data/stderr.log</string>
+</dict>
+</plist>

@@ -68,9 +68,10 @@ Steps on the Mac:
 2. `npm install && node scripts/gen-icons.mjs`
 3. Start it: `node server.mjs` — you should see
    `cmux mirroring listening on http://127.0.0.1:4488`.
-   For a permanent install, copy `com.dmytro.cmux-mirroring.plist` to
-   `~/Library/LaunchAgents/`, fix the node and repo paths inside, then
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dmytro.cmux-mirroring.plist`.
+   For a permanent install, copy `cmux-mirroring.plist.example` to
+   `~/Library/LaunchAgents/com.cmux-mirroring.plist`, fix the node and repo
+   paths inside, then
+   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-mirroring.plist`.
 4. HTTPS on the tailnet (one-time): in the Tailscale admin console enable
    **MagicDNS** and **HTTPS certificates** (running `tailscale serve` prints the
    exact enable link if they're off), then:
@@ -111,7 +112,7 @@ per-category in Settings; everything else is treated as silent background info.
   version; no reinstall. Only if the manifest identity changes (app name/icons)
   do you need to re-add the icon.
 - **Mac:** `git pull && npm install` then restart the server:
-  `launchctl kickstart -k gui/$(id -u)/com.dmytro.cmux-mirroring`
+  `launchctl kickstart -k gui/$(id -u)/com.cmux-mirroring`
   (or restart your `node server.mjs`).
 
 ## Notes
