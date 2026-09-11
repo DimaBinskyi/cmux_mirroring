@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v30'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v31'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -651,11 +651,14 @@ function buildRowsModel(g) {
   return arr;
 }
 
+const termFont = () => Math.min(16, Math.max(7, parseFloat(localStorage.getItem('term-font') || '9.5')));
+
 function paintGrid() {
   const el = $('screen');
   if (!el || !grid || !rowsModel) return;
   el.style.background = grid.bg;
   el.style.color = grid.fg;
+  el.style.fontSize = `${termFont()}px`;
 
   const lines = rowsModel.map((spans) => {
     let col = 0;
@@ -1271,7 +1274,27 @@ async function renderSettings() {
     : '<div class="muted">Preferences unavailable — server unreachable.</div>'}
       </div>
       <div class="muted" style="margin-top:6px">Muted categories still appear in the Feed — they just don't ping the phone. Telegram is unaffected.</div>
+    </div>
+
+    <div class="card">
+      <div class="cfg-label">Terminal</div>
+      <div class="togglerow"><span>Font size</span>
+        <span style="display:flex;gap:10px;align-items:center">
+          <button class="btn" id="font-dec">A−</button>
+          <span id="font-val" class="muted" style="min-width:44px;text-align:center">${termFont()}px</span>
+          <button class="btn" id="font-inc">A＋</button>
+        </span>
+      </div>
+      <div class="muted">Smaller shows more of the terminal at once.</div>
     </div>`;
+
+  const bumpFont = (d) => {
+    const v = Math.min(16, Math.max(7, termFont() + d));
+    localStorage.setItem('term-font', String(v));
+    $('font-val').textContent = `${v}px`;
+  };
+  $('font-dec').onclick = () => bumpFont(-0.5);
+  $('font-inc').onclick = () => bumpFont(0.5);
 
   $('srv-save').onclick = async () => {
     let addr = $('srv-addr').value.trim().replace(/\/+$/, '');

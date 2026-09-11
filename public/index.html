@@ -168,7 +168,8 @@
     .msg.user { background: var(--blue); margin-left: auto; border-bottom-right-radius: 3px; }
     .msg.assistant { background: var(--card); margin-right: auto; border-bottom-left-radius: 3px; }
     .msg.assistant code { background: #0b1120; border-radius: 4px; padding: 0 4px; font-size: 13px; }
-    .tools { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 5px 9px; margin: 5px auto 5px 0; max-width: 86%; color: var(--muted); font-size: 12px; }
+    .tools { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 5px 9px; margin: 5px auto 5px 0; max-width: 86%; color: var(--muted); font-size: 12px; word-break: break-all; overflow-wrap: anywhere; }
+    body.ws.chat #view { overflow-x: hidden; }
     .tools .err { color: var(--err); }
     .pending-card { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
     .pending-card .k { font-size: 11px; text-transform: uppercase; color: var(--warn); letter-spacing: 0.04em; }
@@ -199,7 +200,7 @@
     #term-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
     #screen {
       flex: 1; min-height: 0; overflow: auto; border-radius: 10px; padding: 8px;
-      font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 9.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
       -webkit-overflow-scrolling: touch;
       user-select: text; -webkit-user-select: text;
     }
