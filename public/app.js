@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v35'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v36'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -143,6 +143,54 @@ async function refreshSnapshot() {
 }
 
 // --------------------------------------------------------------- topology
+// Long-press (touch) / right-click (desktop) without stealing the normal tap.
+function onLongPress(el, fn) {
+  let timer = null;
+  let fired = false;
+  const start = () => {
+    fired = false;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      fired = true;
+      if (navigator.vibrate) navigator.vibrate(12);
+      fn();
+    }, 550);
+  };
+  const cancel = () => clearTimeout(timer);
+  el.addEventListener('touchstart', start, { passive: true });
+  el.addEventListener('touchend', cancel);
+  el.addEventListener('touchmove', cancel, { passive: true });
+  el.addEventListener('touchcancel', cancel);
+  el.addEventListener('mousedown', start);
+  el.addEventListener('mouseup', cancel);
+  el.addEventListener('mouseleave', cancel);
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    cancel();
+    if (!fired) fn();
+  });
+  el.addEventListener('click', (e) => {
+    if (fired) {
+      e.preventDefault();
+      e.stopPropagation();
+      fired = false;
+    }
+  }, true);
+}
+
+function renameWorkspacePrompt(id, current) {
+  const title = window.prompt('Rename workspace:', current || '');
+  if (title !== null && title.trim()) wsAction({ action: 'renameWorkspace', workspace_id: id, title: title.trim() });
+}
+
+function renameTabPrompt(surfaceId, current) {
+  const title = window.prompt('Rename tab:', current || '');
+  if (title !== null && title.trim()) {
+    wsAction({ action: 'renameTab', surface_id: surfaceId, workspace_id: ws()?.id, title: title.trim() })
+      .then((ok) => { if (ok) setTimeout(refreshSnapshot, 900); });
+  }
+}
+
 async function wsAction(body, confirmMsg) {
   if (confirmMsg && !window.confirm(confirmMsg)) return false;
   try {
@@ -229,6 +277,8 @@ function renderHome() {
 
   for (const el of $('view').querySelectorAll('[data-ws]')) {
     el.onclick = () => { location.hash = `#/ws/${encodeURIComponent(el.dataset.ws)}`; };
+    const title = byId.get(el.dataset.ws)?.title || '';
+    onLongPress(el, () => renameWorkspacePrompt(el.dataset.ws, title));
   }
   for (const el of $('view').querySelectorAll('[data-close]')) {
     el.onclick = () => wsAction(
@@ -307,6 +357,8 @@ function updateChips() {
 function bindChips() {
   for (const b of $('view').querySelectorAll('[data-surf]')) {
     b.onclick = () => selectSurface(b.dataset.surf);
+    const cur = ws()?.surfaces.find((s) => s.id === b.dataset.surf);
+    onLongPress(b, () => renameTabPrompt(b.dataset.surf, cur?.title || ''));
   }
   for (const b of $('view').querySelectorAll('[data-close-surf]')) {
     b.onclick = async () => {

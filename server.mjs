@@ -304,7 +304,8 @@ async function handleApi(req, res, url) {
 
   // Topology management from the phone: tabs (surfaces), splits, workspaces.
   if (req.method === 'POST' && url.pathname === '/api/ws-action') {
-    const { action, workspace_id, surface_id, cwd } = JSON.parse(await readBody(req));
+    const { action, workspace_id, surface_id, cwd, title } = JSON.parse(await readBody(req));
+    const name = String(title || '').trim().slice(0, 80);
     const home = os.homedir();
     const actions = {
       newTab: () => workspace_id && ['new-surface', '--workspace', workspace_id, '--focus', 'false'],
@@ -313,6 +314,9 @@ async function handleApi(req, res, url) {
       closeWorkspace: () => workspace_id && ['close-workspace', '--workspace', workspace_id],
       newWorkspace: () => ['new-workspace', '--focus', 'false',
         ...(cwd ? ['--cwd', String(cwd).replace(/^~(?=\/|$)/, home)] : [])],
+      renameWorkspace: () => workspace_id && name && ['rename-workspace', '--workspace', workspace_id, name],
+      renameTab: () => surface_id && name && ['rename-tab', '--surface', surface_id,
+        ...(workspace_id ? ['--workspace', workspace_id] : []), name],
     };
     const args = actions[action]?.();
     if (!args) return sendJson(res, 400, { error: 'unknown action or missing target' });
