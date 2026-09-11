@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v33'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v34'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -940,8 +940,13 @@ function setField(ti, text) {
 let ptyCaret = 0;
 
 function diffAndSend(newValue) {
-  const oldCp = [...fieldPrev];
-  const newCp = [...newValue];
+  // On a slash-command line, newlines stay in the field only: forwarding one
+  // makes Claude execute the command. Both sides of the diff use the same
+  // model so the pty stays consistent with what we actually sent.
+  const isSlash = newValue.trimStart().startsWith('/');
+  const model = (t) => (isSlash ? t.replace(/\n/g, '') : t);
+  const oldCp = [...model(fieldPrev)];
+  const newCp = [...model(newValue)];
   let p = 0;
   while (p < oldCp.length && p < newCp.length && oldCp[p] === newCp[p]) p += 1;
   let sfx = 0;
@@ -1070,14 +1075,9 @@ function syncSet(ti, text, tailAfterCursor = 0) {
 function bindTermInput() {
   const ti = $('terminput');
   fieldPrev = ti.value || '';
-  // Enter inserts a newline; ONLY the ⏎ bar button submits. Exception: on a
-  // slash-command line a newline would make Claude execute it — swallow Enter.
-  ti.addEventListener('beforeinput', (e) => {
-    const type = e.inputType || '';
-    if ((type === 'insertLineBreak' || type === 'insertParagraph') && ti.value.trimStart().startsWith('/')) {
-      e.preventDefault();
-    }
-  });
+  // Enter always inserts a newline in the field; ONLY the ⏎ bar button
+  // submits. (On a slash-command line the newline stays local — see
+  // diffAndSend — because sending it would make Claude execute the command.)
   ti.addEventListener('input', () => {
     lastLocalInputTs = Date.now();
     ti.style.height = 'auto';
