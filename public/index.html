@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+  <title>cmux mirroring</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="cmux mirroring">
+  <meta name="theme-color" content="#0f172a">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f172a;
+      --card: #1e293b;
+      --card2: #141c2e;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --dim: #64748b;
+      --accent: #34d399;
+      --accent-text: #052e22;
+      --warn: #f59e0b;
+      --warn-bg: #292524;
+      --err: #f87171;
+      --blue: #1d4ed8;
+      --safe-top: env(safe-area-inset-top);
+      --safe-bottom: env(safe-area-inset-bottom);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 -apple-system, system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    button { appearance: none; border: 0; font: inherit; color: inherit; background: none; padding: 0; }
+
+    /* top bar */
+    #topbar {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: calc(var(--safe-top) + 8px) 12px 8px;
+      background: rgba(15, 23, 42, 0.92);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      min-height: 44px;
+    }
+    #back { font-size: 20px; padding: 4px 10px 4px 0; color: var(--accent); display: none; }
+    #topbar.ws #back { display: block; }
+    #title { font-weight: 700; font-size: 16px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); margin-left: 6px; vertical-align: 1px; }
+    #dot.on { background: var(--accent); }
+    #tabs { display: none; gap: 4px; }
+    #topbar.ws #tabs { display: flex; }
+    #tabs button { padding: 5px 14px; border-radius: 8px; color: var(--muted); font-weight: 600; font-size: 13px; }
+    #tabs button.active { background: var(--accent); color: var(--accent-text); }
+
+    /* main area */
+    #view { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 12px; min-height: 0; }
+    body.ws.term #view {
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      padding: 8px 10px calc(var(--safe-bottom) + 6px);
+    }
+
+    /* bottom nav */
+    #bottomnav {
+      flex: none;
+      display: flex;
+      border-top: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.92);
+      backdrop-filter: blur(10px);
+      padding-bottom: var(--safe-bottom);
+    }
+    #bottomnav button { flex: 1; padding: 10px 0 8px; color: var(--dim); font-weight: 600; font-size: 13px; }
+    #bottomnav button.active { color: var(--accent); }
+    #bottomnav .badge { background: var(--warn); color: #000; border-radius: 8px; padding: 0 6px; font-size: 10px; margin-left: 4px; }
+    body.ws #bottomnav { display: none; }
+
+    /* home list */
+    .ws-row {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: var(--card);
+      border: 1px solid transparent;
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+    }
+    .ws-row.attention { background: var(--warn-bg); border-color: var(--warn); }
+    .ws-row.done { background: #16211a; }
+    .ws-row.idle { opacity: 0.7; }
+    .ws-row .t { font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+    .ws-row .t .when { color: var(--dim); font-size: 12px; font-weight: 400; flex: none; }
+    .ws-row .d { color: var(--muted); font-size: 13px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .group-hd {
+      display: flex; justify-content: space-between; align-items: center;
+      color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+      padding: 8px 4px 4px; width: 100%;
+    }
+    .group-hd .badge { background: var(--warn); color: #000; border-radius: 8px; padding: 1px 7px; font-size: 11px; font-weight: 700; text-transform: none; }
+    .group-kids { margin-left: 10px; }
+    .empty { color: var(--dim); text-align: center; padding: 40px 20px; }
+
+    /* surface chips (cmux tabs/splits) — shown in both Chat and Term */
+    .chips { flex: none; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; -webkit-overflow-scrolling: touch; }
+    .chips button { flex: none; background: var(--card); border-radius: 8px; padding: 4px 12px; font-size: 12px; color: var(--muted); }
+    .chips button.active { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+
+    /* chat */
+    .msg { max-width: 86%; padding: 8px 11px; border-radius: 12px; margin: 6px 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; font-size: 14px; }
+    .msg.user { background: var(--blue); margin-left: auto; border-bottom-right-radius: 3px; }
+    .msg.assistant { background: var(--card); margin-right: auto; border-bottom-left-radius: 3px; }
+    .msg.assistant code { background: #0b1120; border-radius: 4px; padding: 0 4px; font-size: 13px; }
+    .tools { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 5px 9px; margin: 5px auto 5px 0; max-width: 86%; color: var(--muted); font-size: 12px; }
+    .tools .err { color: var(--err); }
+    .pending-card { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
+    .pending-card .k { font-size: 11px; text-transform: uppercase; color: var(--warn); letter-spacing: 0.04em; }
+    .pending-card .b { margin: 4px 0 8px; white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+    .btnrow { display: flex; flex-wrap: wrap; gap: 6px; }
+    .btn { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px; font-weight: 600; font-size: 13px; }
+    .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    .keysrow { display: flex; gap: 5px; margin-top: 8px; flex-wrap: wrap; }
+    .keysrow .btn { padding: 6px 11px; font-family: ui-monospace, monospace; font-size: 13px; }
+    .note { color: var(--dim); font-size: 12px; text-align: center; margin: 8px 0; }
+
+    /* composer (chat only) */
+    #composer { flex: none; border-top: 1px solid var(--border); background: var(--bg); padding: 8px 10px calc(var(--safe-bottom) + 8px); display: none; }
+    body.ws.chat #composer { display: block; }
+    #suggest { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+    #suggest:empty { display: none; }
+    #suggest button { flex: none; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 4px 11px; font-size: 13px; color: var(--muted); }
+    #composer .row { display: flex; gap: 8px; align-items: flex-end; }
+    #input {
+      flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+      color: var(--text); font: inherit; padding: 9px 11px; resize: none; max-height: 110px; min-height: 40px;
+    }
+    #send { background: var(--accent); color: var(--accent-text); border-radius: 10px; padding: 9px 15px; font-weight: 700; }
+    #send:disabled { opacity: 0.4; }
+
+    /* terminal */
+    #term-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+    #screen {
+      flex: 1; min-height: 0; overflow: auto; border-radius: 10px; padding: 8px;
+      font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+      -webkit-overflow-scrolling: touch;
+      user-select: text; -webkit-user-select: text;
+    }
+    #screen .tl { white-space: pre; min-height: 1.35em; }
+    #screen .tl.hitline { background: rgba(245, 158, 11, 0.28); border-radius: 3px; }
+    #jump-live {
+      position: absolute; right: 12px; bottom: 12px;
+      background: var(--accent); color: var(--accent-text); font-weight: 700; font-size: 13px;
+      border-radius: 999px; padding: 8px 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+    }
+    #termbar { flex: none; padding-top: 6px; }
+    #searchrow { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+    #searchrow[hidden] { display: none; }
+    #termsearch { flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; font-size: 13px; padding: 7px 10px; }
+    #searchcount { color: var(--muted); font-size: 12px; min-width: 40px; text-align: right; }
+    #keysbar { display: flex; gap: 5px; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
+    #keysbar .btn { flex: none; padding: 7px 12px; font-family: ui-monospace, monospace; font-size: 13px; }
+    #terminput {
+      width: 100%; margin-top: 6px;
+      background: #000; border: 1px solid var(--border); border-radius: 8px;
+      color: var(--accent); caret-color: var(--accent);
+      font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 9px 11px;
+    }
+    #terminput::placeholder { color: var(--dim); font-family: -apple-system, system-ui, sans-serif; }
+
+    /* feed */
+    .feed-item { border-bottom: 1px solid var(--border); padding: 10px 2px; }
+    .feed-item .t { font-weight: 600; font-size: 14px; }
+    .feed-item .b { color: var(--muted); font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+    .feed-item .when { float: right; color: var(--dim); font-size: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+    .card .muted { color: var(--muted); font-size: 13px; }
+    .bigbtn { display: block; width: 100%; background: var(--accent); color: var(--accent-text); border-radius: 10px; padding: 11px; font-weight: 700; margin-top: 10px; }
+    .bigbtn.secondary { background: var(--card2); color: var(--text); border: 1px solid var(--border); }
+    .hintwarn { color: var(--warn); font-size: 13px; }
+
+    /* settings */
+    .cfg-input {
+      width: 100%; margin-top: 8px;
+      background: var(--card2); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); font: 14px ui-monospace, monospace; padding: 10px 11px;
+    }
+    .cfg-label { font-weight: 600; margin-bottom: 2px; }
+    .togglerow {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px;
+    }
+    .togglerow:last-child { border-bottom: 0; }
+    .togglerow input { width: 22px; height: 22px; accent-color: var(--accent); }
+    .cfg-result { font-size: 13px; margin-top: 8px; }
+    .cfg-result.ok { color: var(--accent); }
+    .cfg-result.bad { color: var(--err); }
+  </style>
+</head>
+<body>
+  <header id="topbar">
+    <button id="back">‹</button>
+    <div id="title">cmux <span id="dot"></span></div>
+    <div id="tabs">
+      <button data-tab="term">Term</button>
+      <button data-tab="chat">Chat</button>
+    </div>
+  </header>
+
+  <main id="view"></main>
+
+  <div id="composer">
+    <div id="suggest"></div>
+    <div class="row">
+      <textarea id="input" rows="1" placeholder="Reply to agent…"></textarea>
+      <button id="send">➤</button>
+    </div>
+  </div>
+
+  <nav id="bottomnav">
+    <button data-route="#/" id="nav-sessions">Sessions</button>
+    <button data-route="#/feed" id="nav-feed">Feed</button>
+    <button data-route="#/settings" id="nav-settings">Settings</button>
+  </nav>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

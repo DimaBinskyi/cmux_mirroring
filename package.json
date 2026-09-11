@@ -1,0 +1,14 @@
+{
+  "name": "cmux-mirroring",
+  "version": "1.0.0",
+  "private": true,
+  "description": "cmux mirroring — phone PWA client for cmux: live colored terminal, agent chat, 2-way input, Web Push. Served over Tailscale.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "icons": "node scripts/gen-icons.mjs"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}
