@@ -11,7 +11,7 @@ const LANE_GLYPH = { attention: '🚨', working: '⚙️', done: '✅', idle: '�
 const TERM_KEYS = [
   ['escape', 'esc'], ['tab', '⇥'], ['shift+tab', '⇧⇥'],
   ['up', '↑'], ['down', '↓'], ['left', '←'], ['right', '→'],
-  ['ctrl-c', '^C'], ['ctrl-d', '^D'], ['ctrl-z', '^Z'], ['ctrl-l', '^L'], ['ctrl-r', '^R'],
+  ['ctrl-c', '^C'],
   ['enter', '⏎'],
 ];
 
@@ -111,9 +111,12 @@ function connectSSE() {
       S.snap = msg.snapshot;
       setDot(msg.snapshot.online);
       if (S.route.name === 'home') renderHome();
-      if (S.route.name === 'ws' && S.tab === 'chat') {
-        clearTimeout(chatRefetchTimer);
-        chatRefetchTimer = setTimeout(fetchChat, 800);
+      if (S.route.name === 'ws') {
+        updateChips(); // tabs created/closed on the Mac appear live
+        if (S.tab === 'chat') {
+          clearTimeout(chatRefetchTimer);
+          chatRefetchTimer = setTimeout(fetchChat, 800);
+        }
       }
       updateNavBadge();
     } else if (msg.type === 'push' && S.route.name === 'feed') {
@@ -272,6 +275,29 @@ async function addTab() {
     const fresh = ws()?.surfaces.find((s) => !before.has(s.id));
     if (fresh) selectSurface(fresh.id);
   }, 1000);
+}
+
+// Refresh the chips row in place when the topology changes on the Mac —
+// without re-rendering the whole view (that would disturb scroll/typing).
+let lastChipsKey = '';
+
+function updateChips() {
+  const w = ws();
+  if (!w || S.route.name !== 'ws') return;
+  if (S.surface && !w.surfaces.some((s) => s.id === S.surface)) {
+    S.surface = null; // current tab was closed on the Mac
+    renderWs();
+    return;
+  }
+  const key = w.surfaces.map((s) => `${s.id}:${s.title}:${s.hasSession}`).join('|') + `@${S.surface}`;
+  if (key === lastChipsKey) return;
+  lastChipsKey = key;
+  const el = $('view').querySelector('.chips');
+  if (!el) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = chipsHtml(w);
+  el.replaceWith(tmp.firstElementChild);
+  bindChips();
 }
 
 function bindChips() {
@@ -453,8 +479,8 @@ function renderTerm() {
         <span id="searchcount"></span>
       </div>
       <div id="keysbar"><button class="btn" id="kb-hide" title="Hide keyboard">⌄⌨</button>${keys}<button class="btn" id="term-attach" title="Attach photo/video">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button></div>
-      <input id="terminput" placeholder="⌨ Type here — mirrors the terminal input line"
-        autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+      <textarea id="terminput" rows="1" placeholder="⌨ Type here — Enter = new line, ⏎ button sends"
+        autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
     </div>`;
   bindChips();
 
@@ -841,7 +867,10 @@ async function submitLine() {
   // Echo-through means the pty already has every character — Enter is enough.
   await specialKey('enter');
   const ti = $('terminput');
-  if (ti) ti.value = '';
+  if (ti) {
+    ti.value = '';
+    ti.style.height = 'auto';
+  }
   fieldPrev = '';
   ptyCaret = 0;
 }
@@ -902,9 +931,12 @@ function diffAndSend(newValue) {
   const delta = target - ptyCaret;
   const RIGHT = '\u001B[C';
   const LEFT = '\u001B[D';
+  // Newlines go out as Meta+Enter (ESC CR): a line break in the Claude
+  // composer instead of a submit. A plain \n would submit the prompt.
+  const insertedPty = inserted.replace(/\n/g, '\u001B\r');
   const ops = (delta > 0 ? RIGHT.repeat(delta) : LEFT.repeat(-delta))
     + '\u007F'.repeat(removed)
-    + inserted;
+    + insertedPty;
   queueOp('text', ops);
   ptyCaret = p + [...inserted].length;
 }
@@ -992,6 +1024,7 @@ function syncFieldFromTerminal(auto = false) {
 // the field alone; otherwise write the trimmed version. The caret estimate
 // follows the terminal's actual cursor position.
 function syncSet(ti, text, tailAfterCursor = 0) {
+  if (ti.value.includes('\n')) return; // multi-line draft in progress — don't flatten it
   const bare = (x) => x.replace(/\s+$/, '');
   const t = bare(text);
   ptyCaret = Math.max(0, [...t].length - tailAfterCursor);
@@ -1006,38 +1039,22 @@ function syncSet(ti, text, tailAfterCursor = 0) {
 function bindTermInput() {
   const ti = $('terminput');
   fieldPrev = ti.value || '';
-  ti.addEventListener('beforeinput', (e) => {
-    lastLocalInputTs = Date.now();
-    const type = e.inputType || '';
-    if (type === 'insertLineBreak' || type === 'insertParagraph') {
-      e.preventDefault();
-      submitLine();
-    }
-    // all other edits land in the 'input' event below and get diffed
-  });
+  // Enter inserts a newline in the textarea (mirrored to the pty as
+  // Meta+Enter); ONLY the ⏎ bar button submits.
   ti.addEventListener('input', () => {
     lastLocalInputTs = Date.now();
+    ti.style.height = 'auto';
+    ti.style.height = `${Math.min(ti.scrollHeight, 100)}px`;
     diffAndSend(ti.value);
   });
   ti.addEventListener('keydown', (e) => {
     lastLocalInputTs = Date.now();
-    if (e.key === 'Enter') {
+    if (e.key === 'ArrowUp' && !ti.value) {
       e.preventDefault();
-      submitLine();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      specialKey('up', true);
-    } else if (e.key === 'ArrowDown') {
+      specialKey('up', true); // history recall only from an empty field
+    } else if (e.key === 'ArrowDown' && !ti.value) {
       e.preventDefault();
       specialKey('down', true);
-    } else if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      specialKey('left');
-      nudgeCaret(-1);
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      specialKey('right');
-      nudgeCaret(1);
     } else if (e.key === 'Tab') {
       e.preventDefault();
       specialKey('tab', true);
@@ -1045,6 +1062,7 @@ function bindTermInput() {
       e.preventDefault();
       specialKey('escape');
     }
+    // arrows with content move the local caret; edits re-align the pty cursor
   });
 }
 
