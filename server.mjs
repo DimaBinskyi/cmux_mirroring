@@ -161,17 +161,22 @@ async function handleApi(req, res, url) {
       };
     };
 
-    // Row model shared with the client: scrollback rows then viewport rows.
-    const total = g.scrollback_rows + g.rows;
+    // Live mode (default) carries only the visible viewport — small and fast.
+    // full=1 additionally includes styled scrollback (used as a frozen snapshot
+    // when the user scrolls up; it is never live-polled).
+    const includeScrollback = q.get('full') === '1';
+    const sbRows = includeScrollback ? g.scrollback_rows : 0;
+    const total = sbRows + g.rows;
     const rowsArr = Array.from({ length: total }, () => []);
-    for (const s of g.scrollback_spans || []) rowsArr[s.row]?.push(s);
-    for (const s of g.row_spans || []) rowsArr[g.scrollback_rows + s.row]?.push(s);
+    if (includeScrollback) for (const s of g.scrollback_spans || []) rowsArr[s.row]?.push(s);
+    for (const s of g.row_spans || []) rowsArr[sbRows + s.row]?.push(s);
     for (const r of rowsArr) r.sort((a, b) => a.column - b.column);
     const keys = rowsArr.map((r) => JSON.stringify(r.map((s) => [s.column, s.style_id, s.text])));
 
     // Delta: if the client is exactly one step behind our cache, send only the
-    // rows that changed (a status-line clock tick is ~1 row instead of ~120KB).
-    const prev = gridCache.get(surface);
+    // rows that changed (a status-line clock tick is ~1 row instead of a grid).
+    const cacheKey = `${surface}:${includeScrollback ? 'f' : 'v'}`;
+    const prev = gridCache.get(cacheKey);
     if (since && prev && prev.seq === since && prev.keys.length === total) {
       const changed = {};
       const usedStyles = new Set();
@@ -183,7 +188,7 @@ async function handleApi(req, res, url) {
           for (const s of rowsArr[i]) usedStyles.add(s.style_id);
         }
       }
-      gridCache.set(surface, { seq, keys });
+      gridCache.set(cacheKey, { seq, keys });
       if (changedCount <= total * 0.4) {
         const styles = {};
         for (const id of usedStyles) {
@@ -193,11 +198,11 @@ async function handleApi(req, res, url) {
         return sendJson(res, 200, { delta: true, seq, cursor: g.cursor, changed, styles });
       }
     } else {
-      gridCache.set(surface, { seq, keys });
+      gridCache.set(cacheKey, { seq, keys });
     }
 
     const used = new Set();
-    for (const s of [...(g.scrollback_spans || []), ...(g.row_spans || [])]) used.add(s.style_id);
+    for (const s of [...(includeScrollback ? g.scrollback_spans || [] : []), ...(g.row_spans || [])]) used.add(s.style_id);
     const styles = {};
     for (const id of used) {
       const def = styleDef(id);
@@ -206,13 +211,13 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, {
       columns: g.columns,
       rows: g.rows,
-      scrollbackRows: g.scrollback_rows,
+      scrollbackRows: sbRows,
       fg: g.terminal_foreground,
       bg: g.terminal_background,
       cursor: g.cursor,
       styles,
       viewport: g.row_spans || [],
-      scrollback: g.scrollback_spans || [],
+      scrollback: includeScrollback ? g.scrollback_spans || [] : [],
       seq,
     });
   }

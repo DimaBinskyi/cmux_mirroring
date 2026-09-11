@@ -1,4 +1,4 @@
-const CACHE = 'cmux-mirroring-v12';
+const CACHE = 'cmux-mirroring-v13';
 const SHELL = ['/', '/app.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
