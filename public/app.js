@@ -188,10 +188,13 @@ function updateNavBadge() {
 function wsRow(w) {
   const detail = w.pending[0]?.title || w.laneDetail || w.lastMessage || w.cwd || '';
   const when = relTime(w.laneTs || w.lastSubmittedAt);
-  return `<button class="ws-row ${w.lane}" data-ws="${esc(w.id)}">
-    <div class="t"><span>${LANE_GLYPH[w.lane] || ''} ${esc(w.title)}</span><span class="when">${when}</span></div>
-    <div class="d">${esc(detail)}</div>
-  </button>`;
+  return `<div class="ws-row ${w.lane}">
+    <button class="ws-open" data-ws="${esc(w.id)}">
+      <div class="t"><span>${LANE_GLYPH[w.lane] || ''} ${esc(w.title)}</span><span class="when">${when}</span></div>
+      <div class="d">${esc(detail)}</div>
+    </button>
+    <button class="ws-close" data-close="${esc(w.id)}" data-title="${esc(w.title)}" title="Close workspace">✕</button>
+  </div>`;
 }
 
 function renderHome() {
@@ -220,6 +223,12 @@ function renderHome() {
 
   for (const el of $('view').querySelectorAll('[data-ws]')) {
     el.onclick = () => { location.hash = `#/ws/${encodeURIComponent(el.dataset.ws)}`; };
+  }
+  for (const el of $('view').querySelectorAll('[data-close]')) {
+    el.onclick = () => wsAction(
+      { action: 'closeWorkspace', workspace_id: el.dataset.close },
+      `Close workspace "${el.dataset.title}"? This kills everything running in it.`,
+    );
   }
   const newWs = $('new-ws');
   if (newWs) {
@@ -425,7 +434,13 @@ function renderTerm() {
   for (const b of $('view').querySelectorAll('[data-tkey]')) {
     const k = b.dataset.tkey;
     if (k === 'enter') b.onclick = submitLine;
-    else b.onclick = () => specialKey(k, SYNC_KEYS.has(k));
+    else {
+      b.onclick = () => {
+        specialKey(k, SYNC_KEYS.has(k));
+        if (k === 'left') nudgeCaret(-1);
+        if (k === 'right') nudgeCaret(1);
+      };
+    }
   }
   $('search-toggle').onclick = toggleSearch;
   $('full-history').onclick = () => (historyMode ? exitHistory() : loadFullHistory());
@@ -801,6 +816,19 @@ async function submitLine() {
   const ti = $('terminput');
   if (ti) ti.value = '';
   fieldPrev = '';
+  ptyCaret = 0;
+}
+
+// Bar/hardware ←→ move the pty cursor; mirror the estimate and the field caret.
+function nudgeCaret(dir) {
+  const ti = $('terminput');
+  const len = [...(ti?.value || '')].length;
+  ptyCaret = Math.max(0, Math.min(len, ptyCaret + dir));
+  try {
+    ti.setSelectionRange(ptyCaret, ptyCaret);
+  } catch {
+    /* not focused */
+  }
 }
 
 // Mirror the terminal's current input line into the field.
@@ -825,18 +853,33 @@ function setField(ti, text) {
 }
 
 // Turn any field edit (word-delete, selection replace, paste, autocorrect…)
-// into the minimal pty edit: erase back to the common prefix with DEL bytes,
-// then retype the changed tail. Assumes the pty cursor sits at end of line.
+// into the minimal pty edit. Cursor-aware: ptyCaret tracks where the pty's
+// cursor sits within the input text (arrow keys move it), the edit region is
+// bounded by common prefix+suffix, and the pty cursor is walked to the right
+// edge of that region with arrow-key escape sequences before DELs + retype.
+let ptyCaret = 0;
+
 function diffAndSend(newValue) {
   const oldCp = [...fieldPrev];
   const newCp = [...newValue];
   let p = 0;
   while (p < oldCp.length && p < newCp.length && oldCp[p] === newCp[p]) p += 1;
-  const erase = oldCp.length - p;
-  const add = newCp.slice(p).join('');
+  let sfx = 0;
+  while (sfx < oldCp.length - p && sfx < newCp.length - p
+    && oldCp[oldCp.length - 1 - sfx] === newCp[newCp.length - 1 - sfx]) sfx += 1;
+  const removed = oldCp.length - p - sfx;
+  const inserted = newCp.slice(p, newCp.length - sfx).join('');
   fieldPrev = newValue;
-  if (!erase && !add) return;
-  queueOp('text', '\u007F'.repeat(erase) + add);
+  if (!removed && !inserted) return;
+  const target = p + removed; // pty cursor must sit at the right edge of the removal
+  const delta = target - ptyCaret;
+  const RIGHT = '\u001B[C';
+  const LEFT = '\u001B[D';
+  const ops = (delta > 0 ? RIGHT.repeat(delta) : LEFT.repeat(-delta))
+    + '\u007F'.repeat(removed)
+    + inserted;
+  queueOp('text', ops);
+  ptyCaret = p + [...inserted].length;
 }
 
 function syncFieldFromTerminal(auto = false) {
@@ -867,6 +910,10 @@ function syncFieldFromTerminal(auto = false) {
     if (!t.trim()) break;
     if (i !== r && !/^\s/.test(t)) break;
   }
+  // Chars after the pty cursor on its row → caret position within the input.
+  const cursorRowLen = [...lineText(vrow(r)).replace(/\s+$/, '')].length;
+  const tailAfterCursor = Math.max(0, cursorRowLen - grid.cursor.column);
+
   if (startRow >= 0) {
     // Preserve internal/trailing spaces exactly — the field must match the pty
     // byte-for-byte or the edit diffing sends garbage. Terminal wraps at exact
@@ -880,7 +927,7 @@ function syncFieldFromTerminal(auto = false) {
       if (i < r) t = t.replace(/\s+$/, ' '); // wrap point: at most one space survives
       parts.push(t);
     }
-    syncSet(ti, parts.join(''));
+    syncSet(ti, parts.join(''), tailAfterCursor);
     return;
   }
   if (auto) {
@@ -909,17 +956,24 @@ function syncFieldFromTerminal(auto = false) {
     .replace(/^\s+/, '')
     .replace(/^[❯>$%#]\s?/, '')
     .replace(/\s*│\s*$/, '');
-  syncSet(ti, text);
+  syncSet(ti, text, tailAfterCursor);
 }
 
 // Erasing repaints old cells as spaces, so grid lines carry phantom trailing
 // whitespace we can't tell apart from a real typed trailing space. Sync
 // ignores trailing whitespace: if field and terminal agree modulo it, leave
-// the field alone; otherwise write the trimmed version.
-function syncSet(ti, text) {
+// the field alone; otherwise write the trimmed version. The caret estimate
+// follows the terminal's actual cursor position.
+function syncSet(ti, text, tailAfterCursor = 0) {
   const bare = (x) => x.replace(/\s+$/, '');
-  if (bare(text) === bare(ti.value)) return;
-  setField(ti, bare(text));
+  const t = bare(text);
+  ptyCaret = Math.max(0, [...t].length - tailAfterCursor);
+  if (t !== bare(ti.value)) setField(ti, t);
+  try {
+    ti.setSelectionRange(ptyCaret, ptyCaret);
+  } catch {
+    /* not focused */
+  }
 }
 
 function bindTermInput() {
@@ -949,6 +1003,14 @@ function bindTermInput() {
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       specialKey('down', true);
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      specialKey('left');
+      nudgeCaret(-1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      specialKey('right');
+      nudgeCaret(1);
     } else if (e.key === 'Tab') {
       e.preventDefault();
       specialKey('tab', true);
