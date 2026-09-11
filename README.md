@@ -7,24 +7,31 @@ works in any browser.
 ## What it does
 
 - **Home = the cmux sidebar**: every workspace with live status (🚨 needs input /
-  ⚙️ working / ✅ done / 💤 idle), current activity, and workspace groups with
-  worst-status roll-up.
-- **Terminal view (default)**: the real pane rendered with full colors and styling
-  via cmux's render grid — scrollback, search, text selection, a key toolbar
-  (esc ⇥ ⇧⇥ arrows ^C ^D ^Z ^L ^R ⏎), and full plain-text history on demand.
-- **Two-way bound input**: the input field mirrors the terminal's input line in both
-  directions — type on the phone and it lands in the pty; type on the Mac (or recall
-  history with ↑) and the field updates itself.
-- **Chat view**: the Claude Code conversation rendered as chat — markdown, collapsed
-  tool calls, permission prompts as Allow/Deny cards, composer with slash-command
-  suggestions.
-- **Web Push notifications**: urgency-mapped pushes that deep-link into the pinging
-  session; they arrive even when the phone is off the tailnet. Category toggles in
-  Settings.
-- **Attachments**: pick a photo/video on the phone — it uploads to the Mac
-  (`data/uploads/`) and the file path is inserted into the prompt for the agent.
-- **Topology from the phone**: create/close tabs, split panes, create/close
-  workspaces (⋯ menu in a session, ＋ on the home screen).
+  ⚙️ working / ✅ done / 💤 idle), current activity, groups with worst-status
+  roll-up, ✕ to close a workspace in place, ＋ to create one.
+- **Terminal view (default)**: the real pane rendered with full colors via cmux's
+  render grid. Live mode carries only the visible screen (~20KB full, ~1KB row
+  deltas, 150ms adaptive polling); scrolling up swaps to a frozen styled snapshot
+  with scrollback — nothing moves while you read, select, or copy. 🔍 search
+  across scrollback with ▲/▼ hit navigation; "▲ All" loads up to 10k lines of
+  plain-text history.
+- **Tabs, not splits**: every cmux tab *and* split shows as a chip. Chips update
+  live when tabs are created/closed on the Mac, each has its own ✕ (with
+  confirmation), and ＋ opens a new tab and switches to it.
+- **Two-way bound input**: a multi-line textarea mirrors the terminal's input line
+  in both directions. Typing echoes locally and streams to the pty (batched,
+  cursor-aware — mid-line edits, word-delete, selection replace, paste all land
+  exactly where the terminal cursor is). ↑ recalls history into both. Enter adds
+  a newline (Meta+Enter in the Claude composer); only the ⏎ button submits.
+- **Key bar**: esc ⇥ ⇧⇥ arrows ^C ⏎, plus ⌄⌨ to hide the keyboard.
+- **Chat view**: the Claude Code conversation rendered as chat — markdown,
+  collapsed tool calls, permission prompts as Allow/Deny cards, composer with
+  slash-command suggestions.
+- **Attachments**: 📎 picks a photo/video on the phone, uploads it to the Mac
+  (`data/uploads/`), and inserts the file path into the prompt for the agent.
+- **Web Push notifications**: urgency-mapped (🚨 needs input / ⚠️ error /
+  ✅ finished / 🤖 background) with per-category toggles in Settings; pushes
+  deep-link into the pinging session and arrive even off the tailnet.
 - **Settings**: server address (host:port) and notification preferences.
 
 ## Architecture
@@ -32,7 +39,8 @@ works in any browser.
 ```
 iPhone PWA (installed from Safari)
  ├─ HTTPS + SSE ── Tailscale ──▶ Node server (Mac, 127.0.0.1:4488, launchd)
- │                                ├─ cmux socket: rpc / events / read-screen / send
+ │                                ├─ cmux control socket (persistent, ~2ms/call;
+ │                                │   newline-JSON protocol, CLI fallback)
  │                                └─ ~/.claude/projects/*.jsonl (chat transcripts)
  └─ Web Push ◀── Apple ◀───────── same server
 ```
@@ -45,14 +53,23 @@ No build step, no framework, one dependency (`web-push`). See `docs/DESIGN.md`.
 2. `node scripts/gen-icons.mjs` (once, generates the PWA icons)
 3. Run it: `node server.mjs` — or install the launchd agent so it survives reboots
    (see `com.dmytro.cmux-mirroring.plist` for a template; adjust paths).
-4. HTTPS on your tailnet: `tailscale serve --bg 4488`
-   (requires MagicDNS + HTTPS certificates enabled for the tailnet).
-5. On the iPhone (Tailscale connected): open `https://<mac-name>.<tailnet>.ts.net`
-   in Safari → Share → **Add to Home Screen** → open from the icon →
-   Settings → **Enable notifications**.
+4. HTTPS on your tailnet: enable Serve/HTTPS for the tailnet once (Tailscale admin
+   console), then `tailscale serve --bg 4488`.
 
-To have cmux notifications pushed to the phone, POST them to the server from a
-notification hook:
+## Install on the iPhone
+
+Two ways (Tailscale connected on the phone):
+
+- **Full install with push (recommended)** — needs the HTTPS step above:
+  open `https://<mac-name>.<tailnet>.ts.net` in Safari → Share →
+  **Add to Home Screen** → open from the icon → Settings →
+  **Enable notifications** → **Send test push**. iOS only grants Web Push to
+  home-screen apps installed from an HTTPS origin.
+- **Quick look without push**: open `http://<mac-tailscale-ip>:4488` in Safari.
+  The full live UI works (terminal, chat, tabs); push and offline caching do
+  not — iOS requires a secure origin for service workers.
+
+To feed cmux notifications to the phone, POST them from a notification hook:
 
 ```bash
 curl -m 5 -H 'Content-Type: application/json' \

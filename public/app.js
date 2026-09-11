@@ -243,7 +243,7 @@ function renderHome() {
 // ---------------------------------------------------------------- workspace
 function chipsHtml(w) {
   const chips = w.surfaces.map((s) => `<span class="chip ${s.id === S.surface ? 'active' : ''}">
-    <button data-surf="${esc(s.id)}">${s.type === 'browser' ? '🌐 ' : ''}${s.hasSession ? '◐ ' : ''}${esc(s.title || s.ref)}</button>
+    <button data-surf="${esc(s.id)}">${s.type === 'browser' ? '🌐 ' : ''}${esc(s.title || s.ref)}</button>
     <button class="chip-x" data-close-surf="${esc(s.id)}" data-title="${esc(s.title || s.ref)}">✕</button>
   </span>`).join('');
   return `<div class="chips">${chips}<button class="chip-add" id="add-tab" title="New tab">＋</button></div>`;
