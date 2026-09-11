@@ -603,22 +603,22 @@ function applySearch() {
 // up in both places.
 const SYNC_KEYS = new Set(['up', 'down', 'tab', 'shift+tab', 'ctrl-r']);
 let opQueue = [];
-let flushTimer = null;
 let flushing = false;
 let keyRefreshTimer = null;
 let lastLocalInputTs = 0;
 
 function scheduleTermRefresh() {
   clearTimeout(keyRefreshTimer);
-  keyRefreshTimer = setTimeout(() => pollGrid(true), 220);
+  keyRefreshTimer = setTimeout(() => pollGrid(true), 60);
 }
 
+// Leading-edge: the first keystroke flushes immediately; anything typed while a
+// request is in flight coalesces and goes out the moment it completes.
 function queueOp(t, v) {
   const last = opQueue[opQueue.length - 1];
   if (t === 'text' && last && last.t === 'text') last.v += v;
   else opQueue.push({ t, v });
-  clearTimeout(flushTimer);
-  flushTimer = setTimeout(flushOps, 120);
+  flushOps();
 }
 
 async function flushOps() {
@@ -644,13 +644,11 @@ async function flushOps() {
 
 async function specialKey(key, sync = false) {
   queueOp('key', key);
-  clearTimeout(flushTimer);
-  await flushOps();
   if (sync) {
     setTimeout(async () => {
       await pollGrid(true);
       syncFieldFromTerminal();
-    }, 380);
+    }, 250);
   }
 }
 
