@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v24'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v25'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -14,7 +14,6 @@ const TERM_KEYS = [
   ['escape', 'esc'], ['tab', '⇥'], ['shift+tab', '⇧⇥'],
   ['up', '↑'], ['down', '↓'], ['left', '←'], ['right', '→'],
   ['ctrl-c', '^C'],
-  ['enter', '⏎'],
 ];
 
 const S = {
@@ -31,8 +30,7 @@ const S = {
 
 let grid = null;
 let rowsModel = null; // array of per-row span lists; full responses rebuild it, deltas patch it
-let gridMode = 'live'; // 'live' = viewport-only, polled; 'snap' = frozen styled snapshot w/ scrollback
-let snapLoading = false;
+let lastFullMode = false; // whether the last grid fetch included scrollback
 let stickBottom = true;
 let historyMode = false; // full plain-text history loaded instead of the live styled grid
 let lastGridChangeTs = Date.now();
@@ -85,7 +83,6 @@ window.addEventListener('hashchange', () => {
   S.chatLimit = 150;
   grid = null;
   rowsModel = null;
-  gridMode = 'live';
   stickBottom = true;
   historyMode = false;
   render();
@@ -256,7 +253,6 @@ function selectSurface(id) {
   S.surface = id;
   grid = null;
   rowsModel = null;
-  gridMode = 'live';
   stickBottom = true;
   historyMode = false;
   if (S.tab === 'chat') {
@@ -481,7 +477,10 @@ function renderTerm() {
         <button class="btn" id="search-next" title="Next hit">▼</button>
         <span id="searchcount"></span>
       </div>
-      <div id="keysbar"><button class="btn" id="kb-hide" title="Hide keyboard">⌄⌨</button>${keys}<button class="btn" id="term-attach" title="Attach photo/video">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button></div>
+      <div id="keysbar">
+        <div class="keysrow-line"><button class="btn" id="kb-hide" title="Hide keyboard">⌄⌨</button>${keys}</div>
+        <div class="keysrow-line"><button class="btn" id="term-attach" title="Attach photo/video">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button><button class="btn" id="send-line" title="Send">⏎</button></div>
+      </div>
       <textarea id="terminput" rows="1" placeholder="⌨ Type here — Enter = new line, ⏎ button sends"
         autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
     </div>`;
@@ -489,17 +488,15 @@ function renderTerm() {
 
   for (const b of $('view').querySelectorAll('[data-tkey]')) {
     const k = b.dataset.tkey;
-    if (k === 'enter') b.onclick = submitLine;
-    else {
-      b.onclick = () => {
-        specialKey(k, SYNC_KEYS.has(k));
-        if (k === 'left') nudgeCaret(-1);
-        if (k === 'right') nudgeCaret(1);
-      };
-    }
+    b.onclick = () => {
+      specialKey(k, SYNC_KEYS.has(k));
+      if (k === 'left') nudgeCaret(-1);
+      if (k === 'right') nudgeCaret(1);
+    };
   }
+  $('send-line').onclick = submitLine;
   $('search-toggle').onclick = toggleSearch;
-  $('full-history').onclick = () => (historyMode ? exitHistory() : loadFullHistory());
+  $('full-history').onclick = () => (historyMode ? goLive() : loadFullHistory());
   $('kb-hide').onclick = () => document.activeElement?.blur?.();
   $('term-attach').onclick = () => pickAttachment($('term-attach'), (p) => {
     const ti = $('terminput');
@@ -518,48 +515,41 @@ function renderTerm() {
   });
   $('search-prev').onclick = () => stepSearch(-1);
   $('search-next').onclick = () => stepSearch(1);
-  $('jump-live').onclick = () => {
-    if (historyMode) exitHistory();
-    else if (S.searchOpen) toggleSearch();
-    else exitSnapshot();
-  };
+  $('jump-live').onclick = goLive;
 
   const screen = $('screen');
-  const enterSnapshot = () => {
+  const enterScrollback = () => {
+    if (!stickBottom) return;
     stickBottom = false;
     $('jump-live').hidden = false;
-    loadSnapshot();
+    pollGrid(true); // pull styled scrollback in; updates keep flowing
   };
   screen.onscroll = () => {
-    if (historyMode || gridMode === 'snap' || snapLoading) return; // frozen views scroll freely
+    if (historyMode) return;
     const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 40;
-    if (!atBottom && stickBottom) {
-      // Scrolling up in live mode: swap to a frozen styled snapshot with
-      // scrollback. Live updates stop until ⤓ Live.
-      enterSnapshot();
-    } else if (atBottom && !stickBottom) {
+    if (!atBottom && stickBottom) enterScrollback();
+    else if (atBottom && !stickBottom && !S.searchOpen) {
       stickBottom = true;
       $('jump-live').hidden = true;
+      pollGrid(true);
     }
   };
   // When the live viewport barely overflows (or not at all), the scroll
   // handler can't fire — catch the upward intent directly: mouse wheel up
   // near the top, or a touch pull-down at the top.
   screen.addEventListener('wheel', (e) => {
-    if (gridMode === 'live' && !historyMode && !snapLoading && e.deltaY < 0 && screen.scrollTop < 80) {
-      enterSnapshot();
-    }
+    if (!historyMode && e.deltaY < 0 && screen.scrollTop < 80) enterScrollback();
   }, { passive: true });
   let touchStartY = null;
   screen.addEventListener('touchstart', (e) => {
     touchStartY = e.touches[0]?.clientY ?? null;
   }, { passive: true });
   screen.addEventListener('touchmove', (e) => {
-    if (touchStartY === null || gridMode !== 'live' || historyMode || snapLoading) return;
+    if (touchStartY === null || historyMode) return;
     const dy = (e.touches[0]?.clientY ?? touchStartY) - touchStartY;
     if (dy > 40 && screen.scrollTop <= 0) {
       touchStartY = null;
-      enterSnapshot();
+      enterScrollback();
     }
   }, { passive: true });
 
@@ -586,15 +576,17 @@ function selectionInScreen() {
 
 async function pollGrid(force) {
   if (S.route.name !== 'ws' || S.tab !== 'term' || !S.surface || historyMode) return;
-  // Frozen while reading the snapshot, searching, or selecting text to copy.
-  if (gridMode === 'snap') return;
-  if (!force && (!stickBottom || S.searchOpen || selectionInScreen())) return;
+  // Always live — pause only while searching or selecting text to copy.
+  if (!force && (S.searchOpen || selectionInScreen())) return;
   try {
-    const since = grid && rowsModel && gridMode === 'live' ? `&since=${encodeURIComponent(grid.seq)}` : '';
-    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${since}`);
+    // At the bottom: viewport only (small + fast). Scrolled up: include the
+    // styled scrollback and KEEP updating — live everywhere.
+    const full = !stickBottom;
+    const since = grid && rowsModel && lastFullMode === full ? `&since=${encodeURIComponent(grid.seq)}` : '';
+    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${full ? '&full=1' : ''}${since}`);
     if (g.unchanged) return;
     lastGridChangeTs = Date.now();
-    if (g.delta && grid && rowsModel) {
+    if (g.delta && grid && rowsModel && lastFullMode === full) {
       grid.seq = g.seq;
       grid.cursor = g.cursor;
       Object.assign(grid.styles, g.styles);
@@ -603,6 +595,7 @@ async function pollGrid(force) {
       grid = g;
       rowsModel = buildRowsModel(g);
     }
+    lastFullMode = full;
     paintGrid();
   } catch (err) {
     const el = $('screen');
@@ -678,7 +671,11 @@ function paintGrid() {
       if (lines[i] !== prevLines[i]) kids[i].innerHTML = lines[i];
     }
   } else {
+    // Full rebuild (e.g. viewport↔scrollback mode switch): keep the reading
+    // position by preserving the distance from the bottom.
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     el.innerHTML = lines.map((l) => `<div class="tl">${l}</div>`).join('');
+    if (!stickBottom) el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - Math.max(0, dist));
   }
   prevLines = lines;
   if (stickBottom) el.scrollTop = el.scrollHeight;
@@ -686,37 +683,23 @@ function paintGrid() {
   syncFieldFromTerminal(true);
 }
 
-// Frozen styled snapshot (viewport + scrollback) — shown while scrolled up or
-// searching; never live-updated, so reading and copying are undisturbed.
-async function loadSnapshot() {
-  if (snapLoading || !S.surface) return;
-  snapLoading = true;
-  const el = $('screen');
-  const distFromBottom = el ? el.scrollHeight - el.scrollTop - el.clientHeight : 0;
-  try {
-    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}&full=1`);
-    gridMode = 'snap';
-    grid = g;
-    rowsModel = buildRowsModel(g);
-    prevLines = null;
-    paintGrid();
-    const screen = $('screen');
-    if (screen) screen.scrollTop = screen.scrollHeight - screen.clientHeight - distFromBottom;
-    if (S.search) applySearch();
-  } catch {
-    /* stay in live mode */
-  } finally {
-    snapLoading = false;
+// Back to the bottom + viewport-only live mode; closes history/search state.
+function goLive() {
+  historyMode = false;
+  const toggle = $('full-history');
+  if (toggle) toggle.textContent = '▲ All';
+  if (S.searchOpen) {
+    S.searchOpen = false;
+    S.search = '';
+    const row = $('searchrow');
+    if (row) row.hidden = true;
+    const tsi = $('termsearch');
+    if (tsi) tsi.value = '';
+    applySearch();
   }
-}
-
-function exitSnapshot() {
-  gridMode = 'live';
-  grid = null;
-  rowsModel = null;
-  prevLines = null;
   stickBottom = true;
   $('jump-live').hidden = true;
+  prevLines = null;
   pollGrid(true);
 }
 
@@ -724,18 +707,19 @@ function toggleSearch() {
   S.searchOpen = !S.searchOpen;
   $('searchrow').hidden = !S.searchOpen;
   if (S.searchOpen) {
-    // Search across the snapshot (includes scrollback), not just the viewport.
-    const ready = historyMode || gridMode === 'snap' ? Promise.resolve() : loadSnapshot();
-    ready.then(() => {
+    // Load scrollback so search covers it; polls pause while searching.
+    const ready = historyMode ? Promise.resolve() : (async () => {
       stickBottom = false;
       $('jump-live').hidden = false;
-      $('termsearch').focus();
-    });
+      await pollGrid(true);
+    })();
+    ready.then(() => $('termsearch').focus());
+  } else if (!historyMode) {
+    goLive();
   } else {
     S.search = '';
     $('termsearch').value = '';
     applySearch();
-    if (!historyMode) exitSnapshot();
   }
 }
 
@@ -761,16 +745,8 @@ async function loadFullHistory() {
     if (S.search) applySearch();
   } catch (err) {
     el.innerHTML = `<div class="empty">history unavailable: ${esc(err.message)}</div>`;
-    exitHistory();
+    goLive();
   }
-}
-
-function exitHistory() {
-  historyMode = false;
-  const toggle = $('full-history');
-  if (toggle) toggle.textContent = '▲ All';
-  if (S.searchOpen) toggleSearch(); // closes search, which exits the snapshot
-  else exitSnapshot();
 }
 
 let searchHits = [];
@@ -1379,7 +1355,17 @@ if (window.visualViewport) {
   }, 2000);
 }
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+  // Notification tapped while the app is open/suspended: jump to that session.
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type === 'open' && e.data.url) {
+      const url = String(e.data.url);
+      const hash = url.includes('#') ? url.slice(url.indexOf('#')) : '#/';
+      if (location.hash !== hash) location.hash = hash;
+    }
+  });
+}
 S.route = parseHash();
 refreshSnapshot().then(() => {
   connectSSE();

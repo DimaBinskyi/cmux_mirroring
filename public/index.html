@@ -103,7 +103,7 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      padding: 8px 10px calc(var(--safe-bottom) + 6px);
+      padding: 8px 10px 4px; /* flush bottom — no safe-area gap under the input */
     }
 
     /* bottom nav */
@@ -215,8 +215,10 @@
     #searchrow[hidden] { display: none; }
     #termsearch { flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; font-size: 13px; padding: 7px 10px; }
     #searchcount { color: var(--muted); font-size: 12px; min-width: 40px; text-align: right; }
-    #keysbar { display: flex; gap: 5px; flex-wrap: wrap; padding-bottom: 2px; }
-    #keysbar .btn { flex: 1 0 auto; text-align: center; padding: 7px 10px; font-family: ui-monospace, monospace; font-size: 13px; }
+    #keysbar { padding-bottom: 2px; }
+    .keysrow-line { display: flex; gap: 5px; margin-bottom: 5px; }
+    .keysrow-line .btn { flex: 1 1 0; min-width: 0; text-align: center; padding: 7px 4px; font-family: ui-monospace, monospace; font-size: 13px; }
+    #send-line { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 700; }
     #terminput {
       width: 100%; margin-top: 6px;
       background: #000; border: 1px solid var(--border); border-radius: 8px;

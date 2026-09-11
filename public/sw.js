@@ -50,9 +50,14 @@ self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   const target = (e.notification.data && e.notification.data.url) || '/';
   e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (list) => {
       for (const client of list) {
-        if ('focus' in client) return client.focus();
+        if ('focus' in client) {
+          await client.focus();
+          // navigate the already-open app to the pinging session
+          client.postMessage({ type: 'open', url: target });
+          return;
+        }
       }
       return clients.openWindow(target);
     }),
