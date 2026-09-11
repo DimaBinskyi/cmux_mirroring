@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v36'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v37'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -525,7 +525,7 @@ function renderTerm() {
     ${chipsHtml(w)}
     <div id="term-wrap">
       <div id="screen"></div>
-      <button id="jump-live" hidden>⤓ Live</button>
+      <button id="jump-live" title="Back to live" hidden>⌄</button>
     </div>
     <div id="termbar">
       <div id="term-suggest" hidden></div>
@@ -539,7 +539,7 @@ function renderTerm() {
         <div class="keysrow-line"><button class="btn" id="kb-hide" title="Hide keyboard">⌄⌨</button>${keys}</div>
         <div class="keysrow-line"><button class="btn" id="term-attach" title="Attach photo/video">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button><button class="btn" id="send-line" title="Send">⏎</button></div>
       </div>
-      <textarea id="terminput" rows="1" placeholder="⌨ Type here — Enter = new line, ⏎ button sends"
+      <textarea id="terminput" rows="1" placeholder="⌨ Type here — Enter = new line, ⏎ sends"
         autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
     </div>`;
   bindChips();
@@ -612,6 +612,7 @@ function renderTerm() {
   }, { passive: true });
 
   bindTermInput();
+  autosizeInput();
   prevLines = null;
   pollGrid(true);
   // Adaptive poll: 200ms while the screen is actively changing, easing to 1s
@@ -837,9 +838,12 @@ async function loadFullHistory() {
   el.innerHTML = '<div class="empty">Loading full history…</div>';
   prevLines = null;
   try {
-    const { text } = await api(`/api/screen?surface=${encodeURIComponent(S.surface)}&scrollback=1&lines=10000`);
+    const { text, altScreen } = await api(`/api/screen?surface=${encodeURIComponent(S.surface)}&scrollback=1&lines=10000`);
     const lines = text.split('\n');
-    el.innerHTML = `<div class="note">full history · ${lines.length} lines · plain text · 🎨 Color returns to live</div>`
+    const note = altScreen
+      ? 'no scrollback — this pane runs a full-screen app, which keeps its own history'
+      : `full history · ${lines.length} lines · plain text`;
+    el.innerHTML = `<div class="note">${esc(note)} · 🎨 Color returns to live</div>`
       + lines.map((l) => `<div class="tl">${esc(l) || ' '}</div>`).join('');
     el.scrollTop = el.scrollHeight;
     if (S.search) applySearch();
@@ -948,7 +952,7 @@ async function submitLine() {
   const ti = $('terminput');
   if (ti) {
     ti.value = '';
-    ti.style.height = 'auto';
+    autosizeInput();
   }
   fieldPrev = '';
   ptyCaret = 0;
@@ -976,10 +980,20 @@ function nudgeCaret(dir) {
 // backs off while the user is typing into the field or a flush is pending.
 let fieldPrev = ''; // the input-line text the pty currently agrees with
 
+// Keep the composer tall enough to read and easy to tap: grows with content
+// (up to ~6 lines) and never collapses below a comfortable 2-line box.
+function autosizeInput() {
+  const ti = $('terminput');
+  if (!ti) return;
+  ti.style.height = 'auto';
+  ti.style.height = `${Math.min(Math.max(ti.scrollHeight, 46), 132)}px`;
+}
+
 function setField(ti, text) {
   fieldPrev = text; // terminal is the source here — reset the diff baseline
   if (ti.value === text) return;
   ti.value = text;
+  autosizeInput();
   try {
     ti.setSelectionRange(text.length, text.length);
   } catch {
@@ -1135,10 +1149,11 @@ function bindTermInput() {
   // diffAndSend — because sending it would make Claude execute the command.)
   ti.addEventListener('input', () => {
     lastLocalInputTs = Date.now();
-    ti.style.height = 'auto';
-    ti.style.height = `${Math.min(ti.scrollHeight, 100)}px`;
+    autosizeInput();
     diffAndSend(ti.value);
   });
+  // Regrow when returning to the field (iOS collapses it on blur/rerender).
+  ti.addEventListener('focus', autosizeInput);
   ti.addEventListener('keydown', (e) => {
     lastLocalInputTs = Date.now();
     if (e.key === 'ArrowUp' && !ti.value) {

@@ -243,7 +243,16 @@ async function handleApi(req, res, url) {
     if (scrollback) {
       const lines = Math.min(Number(q.get('lines')) || 2000, 20000);
       const text = await readScreen(surface, { scrollback: true, lines });
-      return sendJson(res, 200, { text });
+      // Full-screen TUIs (alternate screen) keep no scrollback at all — report
+      // that so the UI can explain an empty history instead of looking broken.
+      let altScreen = false;
+      try {
+        const g = (await rpc('terminal.replay', { surface_id: surface })).render_grid;
+        altScreen = g?.active_screen === 'alternate' || g?.history_rows === 0;
+      } catch {
+        /* best effort */
+      }
+      return sendJson(res, 200, { text, altScreen });
     }
     const out = await rpc('surface.read_text', { surface_id: surface });
     return sendJson(res, 200, { text: out.text || '' });
