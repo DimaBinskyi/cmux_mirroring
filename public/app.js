@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v26'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v27'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1341,13 +1341,17 @@ if (window.visualViewport) {
   const vv = window.visualViewport;
   let maxH = vv.height;
   let settleTimers = [];
+  // Keyboard closed: fill the FULL window (standalone vv.height can exclude
+  // the home-indicator strip → the reported bottom gap). Keyboard open: track
+  // the visual viewport so the bars ride above the keyboard.
+  const kbOpen = () => vv.height < Math.max(window.innerHeight, maxH) - 100;
+  const targetH = () => Math.round(kbOpen() ? vv.height : Math.max(vv.height, window.innerHeight));
   const apply = () => {
     maxH = Math.max(maxH, vv.height);
-    document.body.style.height = `${Math.round(vv.height)}px`;
-    document.body.style.top = `${Math.round(vv.offsetTop)}px`;
-    // keyboard open → it covers the home-indicator area, so drop the
-    // safe-area padding that would otherwise leave a dead gap
-    document.body.classList.toggle('kb-open', vv.height < maxH - 100);
+    const kb = kbOpen();
+    document.body.style.height = `${targetH()}px`;
+    document.body.style.top = `${Math.round(kb ? vv.offsetTop : 0)}px`;
+    document.body.classList.toggle('kb-open', kb);
     window.scrollTo(0, 0);
   };
   const fitViewport = () => {
@@ -1364,7 +1368,7 @@ if (window.visualViewport) {
   // Watchdog: iOS occasionally swallows the resize event after keyboard
   // close — self-heal whenever the applied height drifts from reality.
   setInterval(() => {
-    if (Math.abs(parseFloat(document.body.style.height || '0') - vv.height) > 2) fitViewport();
+    if (Math.abs(parseFloat(document.body.style.height || '0') - targetH()) > 2) fitViewport();
   }, 2000);
 }
 
