@@ -26,6 +26,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const push = new PushService(DATA_DIR, VAPID_SUBJECT);
 const state = new CmuxState(path.join(DATA_DIR, 'events-cursor'), (msg) => console.error(msg));
+const gridCache = new Map(); // surface id -> {seq, keys[]} for /api/grid deltas
 
 // ---------------------------------------------------------------- SSE clients
 const sseClients = new Set();
@@ -141,12 +142,14 @@ async function handleApi(req, res, url) {
     const out = await rpc('terminal.replay', { surface_id: surface });
     const g = out.render_grid;
     if (!g) return sendJson(res, 502, { error: 'no render grid for surface' });
-    const used = new Set();
-    for (const s of [...(g.scrollback_spans || []), ...(g.row_spans || [])]) used.add(s.style_id);
-    const styles = {};
-    for (const st of g.styles || []) {
-      if (!used.has(st.id)) continue;
-      styles[st.id] = {
+    const seq = `${g.render_epoch}/${g.render_revision}/${g.row_space_revision}`;
+    const since = q.get('since');
+    if (since === seq) return sendJson(res, 200, { unchanged: true, seq });
+
+    const styleDef = (id) => {
+      const st = (g.styles || []).find((s) => s.id === id);
+      if (!st) return null;
+      return {
         fg: st.foreground,
         bg: st.background,
         bold: !!st.bold,
@@ -156,6 +159,49 @@ async function handleApi(req, res, url) {
         underline: !!(st.underline && st.underline !== 'none' && st.underline !== false),
         strike: !!st.strikethrough,
       };
+    };
+
+    // Row model shared with the client: scrollback rows then viewport rows.
+    const total = g.scrollback_rows + g.rows;
+    const rowsArr = Array.from({ length: total }, () => []);
+    for (const s of g.scrollback_spans || []) rowsArr[s.row]?.push(s);
+    for (const s of g.row_spans || []) rowsArr[g.scrollback_rows + s.row]?.push(s);
+    for (const r of rowsArr) r.sort((a, b) => a.column - b.column);
+    const keys = rowsArr.map((r) => JSON.stringify(r.map((s) => [s.column, s.style_id, s.text])));
+
+    // Delta: if the client is exactly one step behind our cache, send only the
+    // rows that changed (a status-line clock tick is ~1 row instead of ~120KB).
+    const prev = gridCache.get(surface);
+    if (since && prev && prev.seq === since && prev.keys.length === total) {
+      const changed = {};
+      const usedStyles = new Set();
+      let changedCount = 0;
+      for (let i = 0; i < total; i += 1) {
+        if (keys[i] !== prev.keys[i]) {
+          changed[i] = rowsArr[i];
+          changedCount += 1;
+          for (const s of rowsArr[i]) usedStyles.add(s.style_id);
+        }
+      }
+      gridCache.set(surface, { seq, keys });
+      if (changedCount <= total * 0.4) {
+        const styles = {};
+        for (const id of usedStyles) {
+          const def = styleDef(id);
+          if (def) styles[id] = def;
+        }
+        return sendJson(res, 200, { delta: true, seq, cursor: g.cursor, changed, styles });
+      }
+    } else {
+      gridCache.set(surface, { seq, keys });
+    }
+
+    const used = new Set();
+    for (const s of [...(g.scrollback_spans || []), ...(g.row_spans || [])]) used.add(s.style_id);
+    const styles = {};
+    for (const id of used) {
+      const def = styleDef(id);
+      if (def) styles[id] = def;
     }
     return sendJson(res, 200, {
       columns: g.columns,
@@ -167,8 +213,7 @@ async function handleApi(req, res, url) {
       styles,
       viewport: g.row_spans || [],
       scrollback: g.scrollback_spans || [],
-      // change detector: state_seq is always 0; render_revision actually moves
-      seq: `${g.render_epoch}/${g.render_revision}/${g.row_space_revision}`,
+      seq,
     });
   }
 

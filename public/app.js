@@ -28,8 +28,10 @@ const S = {
 };
 
 let grid = null;
+let rowsModel = null; // array of per-row span lists; full responses rebuild it, deltas patch it
 let stickBottom = true;
 let historyMode = false; // full plain-text history loaded instead of the live styled grid
+let lastGridChangeTs = Date.now();
 
 // Custom server address (Settings): empty = the origin the app was loaded from.
 const BASE = (localStorage.getItem('cmux-server') || '').replace(/\/+$/, '');
@@ -78,6 +80,7 @@ window.addEventListener('hashchange', () => {
   S.searchOpen = false;
   S.chatLimit = 150;
   grid = null;
+  rowsModel = null;
   stickBottom = true;
   historyMode = false;
   render();
@@ -136,7 +139,7 @@ async function refreshSnapshot() {
 
 // ------------------------------------------------------------------- render
 function render() {
-  clearInterval(S.termTimer);
+  clearTimeout(S.termTimer);
   document.body.className = S.route.name === 'ws' ? `ws ${S.tab}` : '';
   $('topbar').className = S.route.name === 'ws' ? 'ws' : '';
   $('nav-sessions').classList.toggle('active', S.route.name === 'home');
@@ -213,6 +216,7 @@ function bindChips() {
     b.onclick = () => {
       S.surface = b.dataset.surf;
       grid = null;
+      rowsModel = null;
       stickBottom = true;
       historyMode = false;
       if (S.tab === 'chat') {
@@ -415,9 +419,17 @@ function renderTerm() {
   bindTermInput();
   prevLines = null;
   pollGrid(true);
-  S.termTimer = setInterval(() => {
-    if (document.visibilityState === 'visible') pollGrid(false);
-  }, 2000);
+  // Adaptive poll: 200ms while the screen is actively changing, easing to 1s
+  // when it's been quiet. Unchanged polls cost ~60 bytes (revision check).
+  const loop = () => {
+    if (S.route.name !== 'ws' || S.tab !== 'term') return;
+    const active = Date.now() - lastGridChangeTs < 10_000;
+    S.termTimer = setTimeout(async () => {
+      if (document.visibilityState === 'visible') await pollGrid(false);
+      loop();
+    }, active ? 200 : 1000);
+  };
+  loop();
 }
 
 function selectionInScreen() {
@@ -430,9 +442,19 @@ async function pollGrid(force) {
   // Frozen while reading history, searching, or selecting text to copy.
   if (!force && (!stickBottom || S.searchOpen || selectionInScreen())) return;
   try {
-    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}`);
-    if (!force && grid && g.seq === grid.seq) return;
-    grid = g;
+    const since = grid && rowsModel ? `&since=${encodeURIComponent(grid.seq)}` : '';
+    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${since}`);
+    if (g.unchanged) return;
+    lastGridChangeTs = Date.now();
+    if (g.delta && grid && rowsModel) {
+      grid.seq = g.seq;
+      grid.cursor = g.cursor;
+      Object.assign(grid.styles, g.styles);
+      for (const [i, spans] of Object.entries(g.changed)) rowsModel[Number(i)] = spans;
+    } else {
+      grid = g;
+      rowsModel = buildRowsModel(g);
+    }
     paintGrid();
   } catch (err) {
     const el = $('screen');
@@ -472,24 +494,22 @@ function spanHtml(s, g) {
 
 let prevLines = null;
 
+function buildRowsModel(g) {
+  const total = g.scrollbackRows + g.rows;
+  const arr = Array.from({ length: total }, () => []);
+  for (const s of g.scrollback) arr[s.row]?.push(s);
+  for (const s of g.viewport) arr[g.scrollbackRows + s.row]?.push(s);
+  for (const r of arr) r.sort((a, b) => a.column - b.column);
+  return arr;
+}
+
 function paintGrid() {
   const el = $('screen');
-  if (!el || !grid) return;
+  if (!el || !grid || !rowsModel) return;
   el.style.background = grid.bg;
   el.style.color = grid.fg;
 
-  const rows = new Map();
-  const add = (r, s) => {
-    if (!rows.has(r)) rows.set(r, []);
-    rows.get(r).push(s);
-  };
-  for (const s of grid.scrollback) add(s.row, s);
-  for (const s of grid.viewport) add(grid.scrollbackRows + s.row, s);
-
-  const total = grid.scrollbackRows + grid.rows;
-  const lines = [];
-  for (let r = 0; r < total; r++) {
-    const spans = (rows.get(r) || []).sort((a, b) => a.column - b.column);
+  const lines = rowsModel.map((spans) => {
     let col = 0;
     let line = '';
     for (const s of spans) {
@@ -497,8 +517,8 @@ function paintGrid() {
       line += spanHtml(s, grid);
       col = s.column + (s.cell_width || [...s.text].length);
     }
-    lines.push(line || ' ');
-  }
+    return line || ' ';
+  });
 
   // Diff per line: typical updates touch a handful of rows, so patching only
   // those keeps repaints cheap and scroll/selection stable.
@@ -684,13 +704,12 @@ function syncFieldFromTerminal(auto = false) {
   // must not gate it — the field keeps focus even while the user types on the
   // Mac). cursor.visible is false on unfocused panes, so it can't gate either.
   if (auto && (opQueue.length || flushing || Date.now() - lastLocalInputTs < 1500)) return;
+  if (!rowsModel) return;
 
-  const byRow = new Map();
-  for (const s of grid.viewport) {
-    if (!byRow.has(s.row)) byRow.set(s.row, []);
-    byRow.get(s.row).push(s);
-  }
-  const rowText = (r) => lineText((byRow.get(r) || []).sort((a, b) => a.column - b.column));
+  // Viewport rows live at the tail of rowsModel (after deltas, grid.viewport
+  // itself is stale — rowsModel is the source of truth).
+  const vrow = (r) => rowsModel[grid.scrollbackRows + r] || [];
+  const rowText = (r) => lineText(vrow(r));
   const r = grid.cursor.row;
 
   // Claude composer block: find the "❯ " row at or above the cursor; rows in
@@ -724,7 +743,7 @@ function syncFieldFromTerminal(auto = false) {
     }
   }
 
-  const spans = (byRow.get(r) || []).sort((a, b) => a.column - b.column);
+  const spans = vrow(r);
   if (!spans.length) return;
   const plain = (s) => {
     const st = grid.styles[s.style_id] || {};
@@ -985,7 +1004,7 @@ for (const b of $('tabs').querySelectorAll('button')) {
   b.onclick = () => {
     S.tab = b.dataset.tab;
     document.body.className = `ws ${S.tab}`;
-    clearInterval(S.termTimer);
+    clearTimeout(S.termTimer);
     renderWs();
   };
 }
