@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v34'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v35'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -221,7 +221,10 @@ function renderHome() {
   const rest = S.snap.workspaces.filter((w) => !grouped.has(w.id));
   html += rest.map(wsRow).join('');
   html += '<button class="bigbtn secondary" id="new-ws">＋ New workspace</button>';
-  html += `<div class="note">app ${APP_VERSION} · win ${window.innerHeight} · vv ${Math.round(window.visualViewport?.height || 0)} · body ${document.body.style.height || 'css-dvh'} · screen ${window.screen.height}</div>`;
+  const bodyRect = document.body.getBoundingClientRect();
+  const sab = getComputedStyle(document.documentElement).getPropertyValue('--sab').trim();
+  html += `<div class="note">app ${APP_VERSION} · win ${window.innerHeight} · screen ${window.screen.height}
+    · body ${Math.round(bodyRect.top)}→${Math.round(bodyRect.bottom)} · doc ${document.documentElement.clientHeight} · sab ${sab || '?'}</div>`;
   $('view').innerHTML = html || '<div class="empty">No workspaces.</div>';
 
   for (const el of $('view').querySelectorAll('[data-ws]')) {
@@ -1417,13 +1420,14 @@ if (window.visualViewport) {
     if (kb) {
       // keyboard: size to the visible area so the bars ride above it
       document.body.style.height = `${Math.round(vv.height)}px`;
+      document.body.style.bottom = 'auto';
       document.body.style.top = `${Math.round(vv.offsetTop)}px`;
     } else {
-      // Keyboard closed: fill the web view exactly (CSS 100dvh). Forcing
-      // screen.height pushed the bottom bars outside the view — the view
-      // really is shorter than the screen in this install (see README note).
+      // Keyboard closed: hand the layout back to CSS (top/bottom inset:0),
+      // so the browser picks the real bottom edge instead of a JS guess.
+      document.body.style.bottom = '';
       document.body.style.height = '';
-      document.body.style.top = '0px';
+      document.body.style.top = '';
     }
     document.body.classList.toggle('kb-open', kb);
     window.scrollTo(0, 0);

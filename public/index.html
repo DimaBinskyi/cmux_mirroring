@@ -27,9 +27,9 @@
       --err: #f87171;
       --blue: #1d4ed8;
       --safe-top: env(safe-area-inset-top);
-      /* The web view in this install already ends above the home indicator,
-         so reserving inset space again would only add a dead strip. */
-      --safe-bottom: 0px;
+      /* Keep a minimal home-indicator clearance: enough not to sit under it,
+         small enough that it never reads as a dead strip. */
+      --safe-bottom: min(env(safe-area-inset-bottom), 12px);
       --sab: env(safe-area-inset-bottom); /* readable from JS for layout debug */
     }
     html { background: var(--bg); }
@@ -37,13 +37,12 @@
     html, body { height: 100%; }
     body {
       margin: 0;
-      /* position:fixed stops iOS document scroll/bounce entirely; height is
-         driven by the visualViewport script below so the bottom bars stay
-         pinned to the visible edge and ride ABOVE the keyboard when it opens */
+      /* No height: inset:0 stretches the shell to the containing block, so the
+         browser decides the real bottom edge instead of us guessing from
+         dvh/innerHeight (all of which under-reported on iOS standalone).
+         JS only overrides this while the keyboard is open. */
       position: fixed;
-      inset: 0;
-      width: 100%;
-      height: 100dvh; /* fallback until the script runs */
+      top: 0; left: 0; right: 0; bottom: 0;
       background: var(--bg);
       color: var(--text);
       font: 15px/1.45 -apple-system, system-ui, sans-serif;
