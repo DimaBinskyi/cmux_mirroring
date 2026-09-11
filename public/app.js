@@ -159,6 +159,7 @@ async function wsAction(body, confirmMsg) {
 // ------------------------------------------------------------------- render
 function render() {
   clearTimeout(S.termTimer);
+  $('switcher').hidden = true;
   document.body.className = S.route.name === 'ws' ? `ws ${S.tab}` : '';
   $('topbar').className = S.route.name === 'ws' ? 'ws' : '';
   $('nav-sessions').classList.toggle('active', S.route.name === 'home');
@@ -1318,6 +1319,29 @@ for (const b of $('tabs').querySelectorAll('button')) {
     renderWs();
   };
 }
+
+// Workspace quick-switcher: switching only — no create/close here.
+function openSwitcher() {
+  const cur = ws();
+  const sheet = $('switcher-sheet');
+  sheet.innerHTML = (S.snap?.workspaces || []).map((w) => `
+    <button class="sw-row ${w.lane === 'attention' ? 'attention' : ''} ${w.id === cur?.id ? 'current' : ''}" data-sw="${esc(w.id)}">
+      <span class="t">${LANE_GLYPH[w.lane] || ''} ${esc(w.title)}</span>
+      <span class="when">${relTime(w.laneTs || w.lastSubmittedAt)}</span>
+    </button>`).join('') || '<div class="empty">No workspaces.</div>';
+  for (const b of sheet.querySelectorAll('[data-sw]')) {
+    b.onclick = () => {
+      $('switcher').hidden = true;
+      if (b.dataset.sw !== cur?.id) location.hash = `#/ws/${encodeURIComponent(b.dataset.sw)}`;
+    };
+  }
+  $('switcher').hidden = false;
+}
+
+$('switcher-btn').onclick = openSwitcher;
+$('switcher').onclick = (e) => {
+  if (e.target === $('switcher')) $('switcher').hidden = true; // tap backdrop closes
+};
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
 S.route = parseHash();

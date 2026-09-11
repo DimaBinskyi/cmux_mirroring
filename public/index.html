@@ -64,6 +64,32 @@
     #tabs button { padding: 5px 14px; border-radius: 8px; color: var(--muted); font-weight: 600; font-size: 13px; }
     #tabs button.active { background: var(--accent); color: var(--accent-text); }
 
+    /* workspace quick-switcher */
+    #switcher-btn { display: none; font-size: 17px; padding: 4px 8px; color: var(--muted); }
+    #topbar.ws #switcher-btn { display: block; }
+    #switcher {
+      position: fixed; inset: 0; z-index: 40;
+      background: rgba(2, 6, 16, 0.6); backdrop-filter: blur(3px);
+      display: flex; align-items: flex-end; justify-content: center;
+    }
+    #switcher[hidden] { display: none; }
+    #switcher-sheet {
+      width: 100%; max-width: 560px; max-height: 65vh; overflow-y: auto;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 16px 16px 0 0;
+      padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
+      -webkit-overflow-scrolling: touch;
+    }
+    .sw-row {
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      width: 100%; text-align: left;
+      background: var(--card); border: 1px solid transparent; border-radius: 10px;
+      padding: 11px 12px; margin-bottom: 6px; font-size: 14px;
+    }
+    .sw-row.attention { background: var(--warn-bg); border-color: var(--warn); }
+    .sw-row.current { border-color: var(--accent); }
+    .sw-row .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sw-row .when { color: var(--dim); font-size: 12px; flex: none; }
+
     /* main area */
     #view { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 12px; min-height: 0; }
     body.ws.term #view {
@@ -225,7 +251,12 @@
       <button data-tab="term">Term</button>
       <button data-tab="chat">Chat</button>
     </div>
+    <button id="switcher-btn" title="Switch workspace">⇄</button>
   </header>
+
+  <div id="switcher" hidden>
+    <div id="switcher-sheet"></div>
+  </div>
 
   <main id="view"></main>
 
