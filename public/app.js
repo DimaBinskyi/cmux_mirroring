@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v37'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v38'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -745,7 +745,10 @@ function paintGrid() {
     if (!stickBottom) el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - Math.max(0, dist));
   }
   prevLines = lines;
-  if (stickBottom) el.scrollTop = el.scrollHeight;
+  if (stickBottom) {
+    el.scrollTop = el.scrollHeight;
+    el.scrollLeft = 0;
+  }
   if (S.search) applySearch();
   syncFieldFromTerminal(true);
   updateTermSuggest();
@@ -786,6 +789,8 @@ function updateTermSuggest() {
 
 // Back to the bottom + viewport-only live mode; closes history/search state.
 function goLive() {
+  const screen = $('screen');
+  if (screen) screen.scrollLeft = 0; // back to the left edge, not just the bottom
   historyMode = false;
   const toggle = $('full-history');
   if (toggle) toggle.textContent = '▲ All';
@@ -1072,19 +1077,22 @@ function syncFieldFromTerminal(auto = false) {
   const tailAfterCursor = Math.max(0, cursorRowLen - grid.cursor.column);
 
   if (startRow >= 0) {
-    // Preserve internal/trailing spaces exactly — the field must match the pty
-    // byte-for-byte or the edit diffing sends garbage. Terminal wraps at exact
-    // column width, so wrapped rows join with no separator; the composer's
-    // 2-space continuation indent is a rendering artifact and is stripped.
-    const parts = [];
+    // Rebuild the composer text row by row. A row reaching the terminal's
+    // right edge was WRAPPED (join with nothing); a row ending early was a
+    // real line break (join with a newline) — that distinction preserves the
+    // user's own formatting. The composer's 2-space continuation indent is a
+    // rendering artifact and is stripped.
+    let out = '';
     for (let i = startRow; i <= r; i += 1) {
-      let t = rowText(i);
-      if (i === startRow) t = t.replace(/^\s*❯\s?/, '');
+      const raw = rowText(i).replace(/\s+$/, '');
+      const wrapped = [...raw].length >= grid.columns - 3;
+      let t = raw;
+      if (i === startRow) t = t.replace(/^\s*\u276F\s?/, '');
       else t = t.replace(/^\s{1,2}/, '');
-      if (i < r) t = t.replace(/\s+$/, ' '); // wrap point: at most one space survives
-      parts.push(t);
+      out += t;
+      if (i < r) out += wrapped ? '' : '\n';
     }
-    syncSet(ti, parts.join(''), tailAfterCursor);
+    syncSet(ti, out, tailAfterCursor);
     return;
   }
   if (auto) {
@@ -1122,7 +1130,6 @@ function syncFieldFromTerminal(auto = false) {
 // the field alone; otherwise write the trimmed version. The caret estimate
 // follows the terminal's actual cursor position.
 function syncSet(ti, text, tailAfterCursor = 0) {
-  if (ti.value.includes('\n')) return; // multi-line draft in progress — don't flatten it
   const bare = (x) => x.replace(/\s+$/, '');
   const t = bare(text);
   if (t !== bare(ti.value)) {
