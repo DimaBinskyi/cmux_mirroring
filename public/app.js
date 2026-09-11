@@ -1,7 +1,7 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v38'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v39'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -34,6 +34,7 @@ let lastFullMode = false; // whether the last grid fetch included scrollback
 let stickBottom = true;
 let historyMode = false; // full plain-text history loaded instead of the live styled grid
 let lastGridChangeTs = Date.now();
+let programmaticScrollTs = 0;
 
 // Custom server address (Settings): empty = the origin the app was loaded from.
 const BASE = (localStorage.getItem('cmux-server') || '').replace(/\/+$/, '');
@@ -584,6 +585,10 @@ function renderTerm() {
   };
   screen.onscroll = () => {
     if (historyMode) return;
+    // Ignore the scroll events our own repaint/jump-to-bottom generates —
+    // they used to bounce the view straight back into scrollback mode,
+    // which is why returning to live took two taps.
+    if (Date.now() - programmaticScrollTs < 600) return;
     const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 40;
     if (!atBottom && stickBottom) enterScrollback();
     else if (atBottom && !stickBottom && !S.searchOpen) {
@@ -746,6 +751,7 @@ function paintGrid() {
   }
   prevLines = lines;
   if (stickBottom) {
+    programmaticScrollTs = Date.now();
     el.scrollTop = el.scrollHeight;
     el.scrollLeft = 0;
   }
@@ -790,7 +796,11 @@ function updateTermSuggest() {
 // Back to the bottom + viewport-only live mode; closes history/search state.
 function goLive() {
   const screen = $('screen');
-  if (screen) screen.scrollLeft = 0; // back to the left edge, not just the bottom
+  programmaticScrollTs = Date.now();
+  if (screen) {
+    screen.scrollLeft = 0; // back to the left edge, not just the bottom
+    screen.scrollTop = screen.scrollHeight;
+  }
   historyMode = false;
   const toggle = $('full-history');
   if (toggle) toggle.textContent = '▲ All';
@@ -1085,7 +1095,7 @@ function syncFieldFromTerminal(auto = false) {
     let out = '';
     for (let i = startRow; i <= r; i += 1) {
       const raw = rowText(i).replace(/\s+$/, '');
-      const wrapped = [...raw].length >= grid.columns - 3;
+      const wrapped = [...raw].length >= grid.columns - 8;
       let t = raw;
       if (i === startRow) t = t.replace(/^\s*\u276F\s?/, '');
       else t = t.replace(/^\s{1,2}/, '');
