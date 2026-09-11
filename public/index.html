@@ -63,15 +63,6 @@
     #topbar.ws #tabs { display: flex; }
     #tabs button { padding: 5px 14px; border-radius: 8px; color: var(--muted); font-weight: 600; font-size: 13px; }
     #tabs button.active { background: var(--accent); color: var(--accent-text); }
-    #ws-menu-btn { display: none; font-size: 20px; padding: 2px 6px 6px; color: var(--muted); }
-    #topbar.ws #ws-menu-btn { display: block; }
-    #ws-menu {
-      position: absolute; right: 10px; top: calc(env(safe-area-inset-top) + 48px); z-index: 30;
-      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-      box-shadow: 0 6px 24px rgba(0,0,0,0.5); overflow: hidden; min-width: 210px;
-    }
-    #ws-menu button { display: block; width: 100%; text-align: left; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
-    #ws-menu button:last-child { border-bottom: 0; color: var(--err); }
 
     /* main area */
     #view { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 12px; min-height: 0; }
@@ -124,10 +115,14 @@
     .group-kids { margin-left: 10px; }
     .empty { color: var(--dim); text-align: center; padding: 40px 20px; }
 
-    /* surface chips (cmux tabs/splits) — shown in both Chat and Term */
+    /* tab chips (cmux tabs AND splits — all treated as tabs here) */
     .chips { flex: none; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; -webkit-overflow-scrolling: touch; }
-    .chips button { flex: none; background: var(--card); border-radius: 8px; padding: 4px 12px; font-size: 12px; color: var(--muted); }
-    .chips button.active { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+    .chips .chip { flex: none; display: flex; align-items: stretch; background: var(--card); border-radius: 8px; overflow: hidden; }
+    .chips .chip button { background: none; padding: 5px 3px 5px 12px; font-size: 12px; color: var(--muted); max-width: 40vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chips .chip .chip-x { padding: 5px 10px 5px 7px; color: var(--dim); font-size: 11px; }
+    .chips .chip.active { background: var(--accent); }
+    .chips .chip.active button { color: var(--accent-text); font-weight: 600; }
+    .chips .chip-add { flex: none; background: var(--card); border-radius: 8px; padding: 5px 13px; color: var(--accent); font-weight: 700; font-size: 14px; }
 
     /* chat */
     .msg { max-width: 86%; padding: 8px 11px; border-radius: 12px; margin: 6px 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; font-size: 14px; }
@@ -229,16 +224,7 @@
       <button data-tab="term">Term</button>
       <button data-tab="chat">Chat</button>
     </div>
-    <button id="ws-menu-btn">⋯</button>
   </header>
-
-  <div id="ws-menu" hidden>
-    <button id="act-newtab">➕ New tab</button>
-    <button id="act-split-r">⬌ Split right</button>
-    <button id="act-split-d">⬍ Split down</button>
-    <button id="act-closetab">✕ Close current tab</button>
-    <button id="act-closews">🗑 Close workspace</button>
-  </div>
 
   <main id="view"></main>
 

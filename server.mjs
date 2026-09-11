@@ -291,12 +291,10 @@ async function handleApi(req, res, url) {
 
   // Topology management from the phone: tabs (surfaces), splits, workspaces.
   if (req.method === 'POST' && url.pathname === '/api/ws-action') {
-    const { action, workspace_id, surface_id, direction, cwd } = JSON.parse(await readBody(req));
+    const { action, workspace_id, surface_id, cwd } = JSON.parse(await readBody(req));
     const home = os.homedir();
     const actions = {
       newTab: () => workspace_id && ['new-surface', '--workspace', workspace_id, '--focus', 'false'],
-      split: () => workspace_id && ['new-split', direction === 'down' ? 'down' : 'right',
-        '--workspace', workspace_id, ...(surface_id ? ['--surface', surface_id] : []), '--focus', 'false'],
       closeTab: () => surface_id && ['close-surface', '--surface', surface_id,
         ...(workspace_id ? ['--workspace', workspace_id] : [])],
       closeWorkspace: () => workspace_id && ['close-workspace', '--workspace', workspace_id],

@@ -142,7 +142,6 @@ async function refreshSnapshot() {
 
 // --------------------------------------------------------------- topology
 async function wsAction(body, confirmMsg) {
-  $('ws-menu').hidden = true;
   if (confirmMsg && !window.confirm(confirmMsg)) return false;
   try {
     await api('/api/ws-action', { method: 'POST', body: JSON.stringify(body) });
@@ -157,7 +156,6 @@ async function wsAction(body, confirmMsg) {
 // ------------------------------------------------------------------- render
 function render() {
   clearTimeout(S.termTimer);
-  $('ws-menu').hidden = true;
   document.body.className = S.route.name === 'ws' ? `ws ${S.tab}` : '';
   $('topbar').className = S.route.name === 'ws' ? 'ws' : '';
   $('nav-sessions').classList.toggle('active', S.route.name === 'home');
@@ -241,28 +239,57 @@ function renderHome() {
 
 // ---------------------------------------------------------------- workspace
 function chipsHtml(w) {
-  if (w.surfaces.length < 2) return '';
-  return `<div class="chips">${w.surfaces.map((s) => `<button data-surf="${esc(s.id)}" class="${s.id === S.surface ? 'active' : ''}">
-    ${s.type === 'browser' ? '🌐 ' : ''}${s.hasSession ? '◐ ' : ''}${esc(s.title || s.ref)}</button>`).join('')}</div>`;
+  const chips = w.surfaces.map((s) => `<span class="chip ${s.id === S.surface ? 'active' : ''}">
+    <button data-surf="${esc(s.id)}">${s.type === 'browser' ? '🌐 ' : ''}${s.hasSession ? '◐ ' : ''}${esc(s.title || s.ref)}</button>
+    <button class="chip-x" data-close-surf="${esc(s.id)}" data-title="${esc(s.title || s.ref)}">✕</button>
+  </span>`).join('');
+  return `<div class="chips">${chips}<button class="chip-add" id="add-tab" title="New tab">＋</button></div>`;
+}
+
+function selectSurface(id) {
+  S.surface = id;
+  grid = null;
+  rowsModel = null;
+  gridMode = 'live';
+  stickBottom = true;
+  historyMode = false;
+  if (S.tab === 'chat') {
+    S.chat = null;
+    renderChat();
+  } else {
+    renderTerm();
+  }
+}
+
+async function addTab() {
+  const w = ws();
+  if (!w) return;
+  const before = new Set(w.surfaces.map((s) => s.id));
+  const ok = await wsAction({ action: 'newTab', workspace_id: w.id });
+  if (!ok) return;
+  setTimeout(async () => {
+    await refreshSnapshot();
+    const fresh = ws()?.surfaces.find((s) => !before.has(s.id));
+    if (fresh) selectSurface(fresh.id);
+  }, 1000);
 }
 
 function bindChips() {
   for (const b of $('view').querySelectorAll('[data-surf]')) {
-    b.onclick = () => {
-      S.surface = b.dataset.surf;
-      grid = null;
-      rowsModel = null;
-      gridMode = 'live';
-      stickBottom = true;
-      historyMode = false;
-      if (S.tab === 'chat') {
-        S.chat = null;
-        renderChat();
-      } else {
-        renderTerm();
-      }
+    b.onclick = () => selectSurface(b.dataset.surf);
+  }
+  for (const b of $('view').querySelectorAll('[data-close-surf]')) {
+    b.onclick = async () => {
+      const w = ws();
+      const ok = await wsAction(
+        { action: 'closeTab', surface_id: b.dataset.closeSurf, workspace_id: w?.id },
+        `Close tab "${b.dataset.title}"?`,
+      );
+      if (ok && S.surface === b.dataset.closeSurf) S.surface = null;
     };
   }
+  const add = $('add-tab');
+  if (add) add.onclick = addTab;
 }
 
 function renderWs() {
@@ -1273,24 +1300,6 @@ for (const b of $('tabs').querySelectorAll('button')) {
     renderWs();
   };
 }
-
-$('ws-menu-btn').onclick = () => {
-  $('ws-menu').hidden = !$('ws-menu').hidden;
-};
-$('act-newtab').onclick = () => wsAction({ action: 'newTab', workspace_id: ws()?.id });
-$('act-split-r').onclick = () => wsAction({ action: 'split', direction: 'right', workspace_id: ws()?.id, surface_id: S.surface });
-$('act-split-d').onclick = () => wsAction({ action: 'split', direction: 'down', workspace_id: ws()?.id, surface_id: S.surface });
-$('act-closetab').onclick = () => {
-  const w = ws();
-  const cur = w?.surfaces.find((s) => s.id === S.surface);
-  wsAction({ action: 'closeTab', surface_id: S.surface, workspace_id: w?.id }, `Close tab "${cur?.title || 'current'}"?`)
-    .then((ok) => { if (ok) S.surface = null; });
-};
-$('act-closews').onclick = () => {
-  const w = ws();
-  wsAction({ action: 'closeWorkspace', workspace_id: w?.id }, `Close workspace "${w?.title}"? This kills everything running in it.`)
-    .then((ok) => { if (ok) location.hash = '#/'; });
-};
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
 S.route = parseHash();
