@@ -11,7 +11,7 @@
 // Pick an IDLE surface: the test types into its composer and clears it again,
 // and never presses Enter except to open the model picker (escaped right after).
 
-import { buildRowsModel, parseInput, computeEdit, normalizeLines } from '../public/term-input.mjs';
+import { buildRowsModel, parseInput, computeEdit, normalizeLines, caretInField } from '../public/term-input.mjs';
 
 const BASE = process.env.BASE || 'http://127.0.0.1:4488';
 const SURFACE = process.argv[2];
@@ -85,7 +85,7 @@ function applySync(parsed) {
     client.prev = parsed.text;
     client.caret = Math.max(0, [...parsed.text].length - parsed.tail);
   } else {
-    client.caret = Math.max(0, [...client.value].length - parsed.tail);
+    client.caret = caretInField(client.value, parsed.text, parsed.tail);
   }
   return parsed;
 }
@@ -156,6 +156,19 @@ await test('a space at the end of a middle line is kept, and not sent twice', as
   check(`${name} — kept`, client.value, 'abc \ndef');
   await typeInField('abc x\ndef');
   check(`${name} — not doubled`, applySync(await readInput())?.text, 'abc x\ndef');
+});
+
+// The terminal's text is short by every trailing space the grid cannot show, so
+// counting the caret back from the field's end put it one character early after
+// an edit somewhere else in the line — and the next thing typed landed BEFORE
+// the space: "some text " + "new" came out of the pty as "some textnew".
+await test('typing at the end after an edit keeps a trailing space in place', async (name) => {
+  await typeInField('somme text ');
+  applySync(await readInput()); // the sync that used to skew the caret
+  await typeInField('some text '); // delete the extra "m", mid-word
+  applySync(await readInput());
+  await typeInField('some text new'); // back to the end, keep typing
+  check(name, applySync(await readInput())?.text, 'some text new');
 });
 
 // Newlines used to be withheld from the terminal whenever the line started with

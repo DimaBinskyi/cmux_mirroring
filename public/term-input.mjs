@@ -83,8 +83,13 @@ function indexForColumn(cells, column) {
  *   { kind: 'busy' }  — a dialog/menu owns the keyboard (/model, permission
  *       prompts, any TUI): the field must be left exactly as the user left it.
  *   null — nothing recognizable.
+ *
+ * `afterKey` says the read follows a key the field itself just sent (⇥ ↑ ↓ ^R),
+ * which is only ever pressed at an input line — it waives the guard that treats
+ * anything drawn below the cursor as a TUI, because that is exactly where a
+ * shell prints its completion candidates.
  */
-export function parseInput(grid, rowsModel) {
+export function parseInput(grid, rowsModel, { afterKey = false } = {}) {
   if (!grid || !grid.cursor || !rowsModel) return null;
   const isFaint = (s) => (grid.styles[s.style_id] || {}).faint;
   // Faint spans are placeholders and hints ("Try …", "? for shortcuts"), never input.
@@ -126,12 +131,14 @@ export function parseInput(grid, rowsModel) {
   // --- Shell prompt ---------------------------------------------------------
   // Guarded so TUI content never leaks into the field: the cursor row must look
   // like a prompt line AND be the last row with content (shells park the cursor
-  // at the bottom; menus and dialogs always have a footer below it).
+  // at the bottom; menus and dialogs always have a footer below it). Tab
+  // completion is the exception — its candidate list is printed right below the
+  // prompt — so `afterKey` waives the second half.
   if (!SHELL_PROMPT.test(textAt(r).slice(0, 40))) return null;
-  for (let i = grid.rows - 1; i > r; i -= 1) if (!blank(i)) return { kind: 'busy' };
+  if (!afterKey) for (let i = grid.rows - 1; i > r; i -= 1) if (!blank(i)) return { kind: 'busy' };
 
-  // Prompts are colored or bold, typed input is not: the input is the trailing
-  // run of plainly-styled spans on the cursor row.
+  // Prompts are colored or bold, typed input is not: the input is the run of
+  // plainly-styled spans that ends the cursor row.
   const spans = (rowsModel[grid.scrollbackRows + r] || []).filter((s) => !isFaint(s));
   if (!spans.length) return null;
   const plain = (s) => {
@@ -140,12 +147,21 @@ export function parseInput(grid, rowsModel) {
       && (!st.bg || st.bg.toLowerCase() === grid.bg.toLowerCase())
       && !st.bold && !st.inverse && !st.italic;
   };
-  let from = spans.length;
+  let last = spans.length - 1;
+  while (last >= 0 && !plain(spans[last])) last -= 1;
+  if (last < 0) return null; // nothing plainly styled — leave the field alone
+  let from = last + 1;
   while (from > 0 && plain(spans[from - 1])) from -= 1;
-  if (from === spans.length) return null; // no plain tail — leave the field alone
+  // What a completion inserts comes back styled (zsh bolds the trailing "/" of
+  // a directory), so the input does not always end plainly. Take styled spans
+  // that sit flush against the plain run too; a right-hand prompt is separated
+  // by a gap of blank columns and stays out.
+  const spanEnd = (s) => s.column + (s.cell_width || [...s.text].length);
+  let to = last + 1;
+  while (to < spans.length && spans[to].column === spanEnd(spans[to - 1])) to += 1;
   // Drop the prompt on the cells rather than the string, so the cursor column
   // still maps onto what is left.
-  const tail = trimTail(rowCells(spans.slice(from)));
+  const tail = trimTail(rowCells(spans.slice(from, to)));
   let cut = 0;
   while (cut < tail.length && /\s/.test(tail[cut][0])) cut += 1;
   if (cut < tail.length && /[❯>$%#]/.test(tail[cut][0])) {
@@ -236,3 +252,28 @@ export function computeEdit(prevValue, newValue, caret, { lineBreak = 'escape' }
 // field and terminal ignoring trailing whitespace on every line: if they agree
 // that far, the field is authoritative and must not be rewritten.
 export const normalizeLines = (s) => String(s).split('\n').map((l) => l.replace(/\s+$/, '')).join('\n');
+
+// Where the pty's cursor sits *in the field*, given the terminal's own text and
+// how many characters follow the cursor there (`tail`).
+//
+// The two strings only agree up to trailing whitespace — the terminal's is
+// short by every space the grid could not show — so counting `tail` back from
+// the field's end slides the caret right by that many characters, and the next
+// edit is then typed one space too early ("some text " + "new" came out as
+// "some textnew"). Walk the lines instead: an interior caret has the same index
+// in both, and one parked at the end of a line goes to the end of the FIELD's
+// line, past whatever trailing spaces only it knows about.
+export function caretInField(fieldValue, text, tail = 0) {
+  const fieldLines = String(fieldValue).split('\n');
+  const textLines = String(text).split('\n');
+  let caret = Math.max(0, [...text].length - tail);
+  let offset = 0;
+  for (let i = 0; i < textLines.length; i += 1) {
+    const inText = [...textLines[i]].length;
+    const inField = [...(fieldLines[i] ?? textLines[i])].length;
+    if (caret <= inText) return offset + (caret === inText ? Math.max(inField, caret) : caret);
+    caret -= inText + 1; // this line plus its newline
+    offset += inField + 1;
+  }
+  return [...String(fieldValue)].length;
+}

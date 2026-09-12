@@ -111,6 +111,71 @@ function notifyCategory(title = '') {
   return 'silent';
 }
 
+// Content types for the phone's own uploads (/api/upload-file). Separate from
+// MIME below, which only covers the static app shell.
+const UPLOAD_MIME = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
+  '.avif': 'image/avif',
+  '.mov': 'video/quicktime',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/x-m4v',
+  '.webm': 'video/webm',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/plain; charset=utf-8',
+  '.json': 'application/json',
+};
+
+// Phone uploads are a scratch pad, not an archive: photos and videos pile up in
+// data/ forever otherwise. Anything older than 30 days is swept at startup and
+// once a day after that — the paths in older transcripts stop resolving, which
+// is the trade for not hoarding the camera roll on the Mac.
+const UPLOAD_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+// A client-supplied upload name resolved to an absolute path, or null if it
+// tries to point anywhere but data/uploads.
+function uploadPath(name) {
+  const dir = path.join(DATA_DIR, 'uploads');
+  const base = path.basename(String(name || ''));
+  const file = path.join(dir, base);
+  if (!base || base === '.' || base === '..' || !file.startsWith(dir + path.sep)) return null;
+  return file;
+}
+
+function sweepUploads() {
+  const dir = path.join(DATA_DIR, 'uploads');
+  const cutoff = Date.now() - UPLOAD_TTL_MS;
+  let removed = 0;
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 0; // nothing uploaded yet
+  }
+  for (const name of names) {
+    try {
+      const st = fs.statSync(path.join(dir, name));
+      if (st.isFile() && st.mtimeMs < cutoff) {
+        fs.unlinkSync(path.join(dir, name));
+        removed += 1;
+      }
+    } catch {
+      /* vanished or unreadable — leave it */
+    }
+  }
+  if (removed) console.log(`swept ${removed} upload(s) older than 30 days`);
+  return removed;
+}
+
+sweepUploads();
+setInterval(sweepUploads, 24 * 60 * 60 * 1000).unref();
+
 function findWorkspace(id) {
   return state.workspaces.find((w) => w.id === id || w.ref === id);
 }
@@ -359,6 +424,88 @@ async function handleApi(req, res, url) {
       req.on('error', reject);
     });
     return sendJson(res, 200, { ok: true, path: file, size });
+  }
+
+  // What this phone has uploaded, newest first — the app's attachment gallery.
+  if (req.method === 'GET' && url.pathname === '/api/uploads') {
+    const dir = path.join(DATA_DIR, 'uploads');
+    let names = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      /* nothing uploaded yet */
+    }
+    const files = names.map((name) => {
+      try {
+        const st = fs.statSync(path.join(dir, name));
+        return st.isFile() ? { name, path: path.join(dir, name), size: st.size, mtime: st.mtimeMs } : null;
+      } catch {
+        return null; // vanished between readdir and stat
+      }
+    }).filter(Boolean).sort((a, b) => b.mtime - a.mtime).slice(0, 300);
+    return sendJson(res, 200, { files });
+  }
+
+  // One uploaded file, by name only: uploadPath() keeps this inside
+  // data/uploads, so it is not a read-anything-on-the-Mac hole. Range requests
+  // are answered because iOS will not play a <video> without it.
+  if (req.method === 'GET' && url.pathname === '/api/upload-file') {
+    const file = uploadPath(q.get('name'));
+    if (!file) return sendJson(res, 400, { error: 'bad name' });
+    const name = path.basename(file);
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      return sendJson(res, 404, { error: 'not found' });
+    }
+    if (!st.isFile()) return sendJson(res, 404, { error: 'not found' });
+    const head = {
+      'Content-Type': UPLOAD_MIME[path.extname(name).toLowerCase()] || 'application/octet-stream',
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'private, max-age=3600', // names carry a timestamp, so they never change
+      ...CORS,
+    };
+    const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+    if (m && (m[1] || m[2])) {
+      const start = m[1] ? Number(m[1]) : Math.max(0, st.size - Number(m[2]));
+      const end = m[1] ? Math.min(m[2] ? Number(m[2]) : st.size - 1, st.size - 1) : st.size - 1;
+      if (start > end || start >= st.size) {
+        res.writeHead(416, { 'Content-Range': `bytes */${st.size}`, ...CORS });
+        return res.end();
+      }
+      res.writeHead(206, { ...head, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1 });
+      return fs.createReadStream(file, { start, end }).pipe(res);
+    }
+    res.writeHead(200, { ...head, 'Content-Length': st.size });
+    return fs.createReadStream(file).pipe(res);
+  }
+
+  // Deleting from the phone — one `name`, or a batch of `names` so clearing out
+  // a selection is a single round trip. POST, not DELETE: the PWA may be
+  // pointed at a different host:port than it was installed from, and CORS only
+  // clears GET and POST here.
+  if (req.method === 'POST' && url.pathname === '/api/upload-delete') {
+    const body = JSON.parse(await readBody(req));
+    const names = Array.isArray(body.names) ? body.names : [body.name];
+    const files = names.map(uploadPath);
+    if (!files.length || files.some((f) => !f)) return sendJson(res, 400, { error: 'bad name' });
+    let deleted = 0;
+    let missing = 0;
+    const failed = [];
+    for (const file of files) {
+      try {
+        fs.unlinkSync(file);
+        deleted += 1;
+      } catch (err) {
+        // Already gone is the outcome the caller wanted; the listing it worked
+        // from was just stale.
+        if (err.code === 'ENOENT') missing += 1;
+        else failed.push(`${path.basename(file)}: ${err.message}`);
+      }
+    }
+    if (failed.length) return sendJson(res, 500, { error: failed.join('; '), deleted });
+    return sendJson(res, 200, { ok: true, deleted, missing });
   }
 
   // ------------------------------------------------------------- push (existing)

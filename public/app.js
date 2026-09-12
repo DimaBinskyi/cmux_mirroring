@@ -2,10 +2,10 @@
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
 import {
-  lineText, buildRowsModel, parseInput, computeEdit, normalizeLines,
+  lineText, buildRowsModel, parseInput, computeEdit, normalizeLines, caretInField,
 } from './term-input.mjs';
 
-const APP_VERSION = 'v42'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v45'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -444,10 +444,20 @@ function pendingCard(item) {
 }
 
 function mdLite(text) {
-  return esc(text)
+  return linkUploads(esc(text)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>'));
 }
+
+// A path to something this phone uploaded becomes a chip that opens the file —
+// on a phone the full path is a wall of text nobody can check anyway. Upload
+// names are sanitized server-side to [\w.-], so they are safe inside the
+// attribute without a second escape.
+const UPLOAD_PATH = /(?:\/[\w.-]+)*\/data\/uploads\/([\w.-]+)/g;
+const linkUploads = (html) => html.replace(
+  UPLOAD_PATH,
+  (_, name) => `<button class="filelink" data-file="${name}">📎 ${fileLabel(name)}</button>`,
+);
 
 function renderChat() {
   const w = ws();
@@ -465,13 +475,13 @@ function renderChat() {
       while (i < msgs.length && msgs[i].role === 'tool') {
         const t = msgs[i];
         const mark = t.status === 'error' ? '<span class="err">✗</span>' : t.status === 'ok' ? '✓' : '…';
-        lines.push(`🔧 ${esc(t.name)} ${esc(t.detail)} ${mark}`);
+        lines.push(`🔧 ${esc(t.name)} ${linkUploads(esc(t.detail))} ${mark}`);
         i += 1;
       }
       html += `<div class="tools">${lines.join('<br>')}</div>`;
       continue;
     }
-    html += `<div class="msg ${m.role}">${m.role === 'assistant' ? mdLite(m.text) : esc(m.text)}</div>`;
+    html += `<div class="msg ${m.role}">${m.role === 'assistant' ? mdLite(m.text) : linkUploads(esc(m.text))}</div>`;
     i += 1;
   }
   if (!msgs.length) html += `<div class="empty">${esc(S.chat?.note || 'Loading conversation…')}</div>`;
@@ -488,6 +498,8 @@ function renderChat() {
       fetchChat();
     };
   }
+
+  for (const b of view.querySelectorAll('.filelink')) b.onclick = () => openViewer(b.dataset.file);
 
   for (const card of view.querySelectorAll('.pending-card')) {
     for (const b of card.querySelectorAll('[data-reply]')) {
@@ -569,7 +581,7 @@ function renderTerm() {
       </div>
       <div id="keysbar">
         <div class="keysrow-line"><button class="btn" id="kb-hide" title="Hide keyboard">⌄⌨</button>${keys}</div>
-        <div class="keysrow-line"><button class="btn" id="term-attach" title="Attach photo/video">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button><button class="btn" id="send-line" title="Send">⏎</button></div>
+        <div class="keysrow-line"><button class="btn" id="term-attach" title="Attach photo/video — hold to browse uploads">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button><button class="btn" id="send-line" title="Send">⏎</button></div>
       </div>
       <textarea id="terminput" rows="1" placeholder="⌨ Type here — Enter = new line, ⏎ sends"
         autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
@@ -588,11 +600,8 @@ function renderTerm() {
   $('search-toggle').onclick = toggleSearch;
   $('full-history').onclick = () => (historyMode ? goLive() : loadFullHistory());
   $('kb-hide').onclick = () => document.activeElement?.blur?.();
-  $('term-attach').onclick = () => pickAttachment($('term-attach'), (p) => {
-    const ti = $('terminput');
-    ti.value += `${ti.value && !ti.value.endsWith(' ') ? ' ' : ''}${p} `;
-    ti.dispatchEvent(new Event('input', { bubbles: true })); // diff sends the path to the pty
-  });
+  $('term-attach').onclick = () => pickAttachment($('term-attach'), insertPath);
+  onLongPress($('term-attach'), openGallery); // hold: browse what has been uploaded
   $('termsearch').addEventListener('input', () => {
     S.search = $('termsearch').value;
     applySearch();
@@ -988,7 +997,7 @@ async function specialKey(key, sync = false) {
   if (sync) {
     setTimeout(async () => {
       await pollGrid(true);
-      syncFieldFromTerminal();
+      syncFieldFromTerminal(false, true);
     }, 160);
   }
 }
@@ -1064,14 +1073,14 @@ function diffAndSend(newValue) {
 // shapes it recognizes). auto=true runs on every repaint — that is what shows
 // Mac-side typing and history recalls on the phone — but backs off while the
 // user is typing here or a flush is pending.
-function syncFieldFromTerminal(auto = false) {
+function syncFieldFromTerminal(auto = false, afterKey = false) {
   const ti = $('terminput');
   if (!ti || !grid || !rowsModel) return;
   // Field focus must not gate this: the field keeps focus even while the user
   // types on the Mac. cursor.visible is false on unfocused panes, so it can't
   // gate it either.
   if (auto && (opQueue.length || flushing || Date.now() - lastLocalInputTs < 1500)) return;
-  const parsed = parseInput(grid, rowsModel);
+  const parsed = parseInput(grid, rowsModel, { afterKey });
   // 'busy' means a dialog or menu owns the keyboard (/model, a permission
   // prompt, any TUI) — the field must keep whatever the user has drafted.
   if (!parsed || parsed.kind === 'busy') return;
@@ -1094,7 +1103,9 @@ function syncSet(ti, text, tail = 0) {
       /* not focused */
     }
   } else {
-    ptyCaret = Math.max(0, [...ti.value].length - tail);
+    // Same text, but the field may hold trailing spaces the grid dropped — the
+    // caret has to be mapped through them, not counted back from the end.
+    ptyCaret = caretInField(ti.value, text, tail);
   }
 }
 
@@ -1133,13 +1144,189 @@ function bindTermInput() {
 // -------------------------------------------------------------- attachments
 // Photo/video from the phone: uploads to the Mac, then the saved file path is
 // inserted into the prompt so the agent can open it (images are readable by
-// Claude; videos just land on the Mac).
+// Claude; videos just land on the Mac). Everything uploaded stays browsable —
+// tap 📎 to add one, hold it to look at what has already gone over.
 let attachHandler = null;
+
+const IMAGE_FILE = /\.(jpe?g|png|gif|webp|heic|heif|avif|bmp)$/i;
+const VIDEO_FILE = /\.(mov|mp4|m4v|webm)$/i;
+// Uploads are saved as "<epoch-ms>-<original name>"; the stamp is noise to read.
+const fileLabel = (name) => String(name).replace(/^\d{10,}-/, '');
+const fileUrl = (name) => `${BASE}/api/upload-file?name=${encodeURIComponent(name)}`;
+
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const n = bytes / 1024 ** i;
+  return `${n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
+}
 
 function pickAttachment(btn, onPath) {
   attachHandler = { btn, onPath, label: btn.textContent };
   $('attach-file').click();
 }
+
+// Drop a path into whichever input the user is looking at.
+function insertPath(p) {
+  const term = S.route.name === 'ws' && S.tab === 'term';
+  const el = term ? $('terminput') : $('input');
+  if (!el) return;
+  el.value += `${el.value && !el.value.endsWith(' ') ? ' ' : ''}${p} `;
+  if (term) {
+    el.dispatchEvent(new Event('input', { bubbles: true })); // the diff sends it to the pty
+  } else {
+    el.focus();
+    renderSuggestions();
+  }
+}
+
+// The sheet doubles as a bulk editor: hold a row to start selecting, tap rows
+// to add and drop them, then delete the lot in one request. The listing is kept
+// so toggling a selection is a re-render, not a refetch.
+let galleryFiles = [];
+let gallerySelected = null; // Set of names while selecting, null when not
+
+function closeGallery() {
+  $('gallery').hidden = true;
+  gallerySelected = null;
+}
+
+async function openGallery() {
+  const sheet = $('gallery-sheet');
+  sheet.innerHTML = '<div class="note">Loading attachments…</div>';
+  $('gallery').hidden = false;
+  gallerySelected = null;
+  try {
+    ({ files: galleryFiles } = await api('/api/uploads'));
+  } catch (err) {
+    sheet.innerHTML = `<div class="note">Attachments unavailable: ${esc(err.message)}</div>`;
+    return;
+  }
+  renderGallery();
+}
+
+function renderGallery() {
+  const sheet = $('gallery-sheet');
+  if (!galleryFiles.length) {
+    sheet.innerHTML = '<div class="note">Nothing attached yet — 📎 uploads a photo or video from this phone.</div>';
+    return;
+  }
+  const picked = gallerySelected;
+  // ＋ only where there is a field to insert into — opened from Settings there
+  // is none, and a button that silently does nothing is worse than no button.
+  const canInsert = !picked && S.route.name === 'ws';
+  const head = picked
+    ? `<span>${picked.size} selected</span>
+       <span class="gl-acts">
+         <button class="gl-act" id="gl-all">${picked.size === galleryFiles.length ? 'None' : 'All'}</button>
+         <button class="gl-act" id="gl-cancel">Cancel</button>
+         <button class="gl-act danger" id="gl-del-sel" ${picked.size ? '' : 'disabled'}>🗑 Delete</button>
+       </span>`
+    : `<span>Attachments · ${galleryFiles.length}</span><span>kept 30 days · hold to select</span>`;
+  sheet.innerHTML = `<div class="gl-hd">${head}</div>`
+    + galleryFiles.map((f) => {
+      const thumb = IMAGE_FILE.test(f.name)
+        ? `<img class="gl-thumb" src="${fileUrl(f.name)}" loading="lazy" alt="">`
+        : `<span class="gl-thumb">${VIDEO_FILE.test(f.name) ? '🎞' : '📄'}</span>`;
+      const on = !!picked?.has(f.name);
+      return `<div class="gl-row${on ? ' sel' : ''}" data-row="${esc(f.name)}">
+        <button class="gl-open" data-file="${esc(f.name)}">
+          ${picked ? `<span class="gl-check">${on ? '✓' : '○'}</span>` : ''}${thumb}
+          <span class="gl-meta"><span class="t">${esc(fileLabel(f.name))}</span>
+            <span class="d">${relTime(f.mtime)} · ${fmtSize(f.size)}</span></span>
+        </button>
+        ${canInsert ? `<button class="gl-insert" data-insert="${esc(f.path)}" title="Insert path">＋</button>` : ''}
+        ${picked ? '' : `<button class="gl-del" data-del="${esc(f.name)}" title="Delete">🗑</button>`}
+      </div>`;
+    }).join('');
+
+  for (const b of sheet.querySelectorAll('[data-file]')) {
+    const { file } = b.dataset;
+    b.onclick = () => (gallerySelected ? toggleSelected(file) : openViewer(file));
+    onLongPress(b, () => {
+      gallerySelected = gallerySelected || new Set();
+      gallerySelected.add(file);
+      renderGallery();
+    });
+  }
+  for (const b of sheet.querySelectorAll('[data-insert]')) {
+    b.onclick = () => {
+      insertPath(b.dataset.insert);
+      closeGallery();
+    };
+  }
+  for (const b of sheet.querySelectorAll('[data-del]')) b.onclick = () => deleteUploads([b.dataset.del]);
+  if (picked) {
+    $('gl-cancel').onclick = () => {
+      gallerySelected = null;
+      renderGallery();
+    };
+    $('gl-all').onclick = () => {
+      gallerySelected = picked.size === galleryFiles.length ? new Set() : new Set(galleryFiles.map((f) => f.name));
+      renderGallery();
+    };
+    $('gl-del-sel').onclick = () => deleteUploads([...picked]);
+  }
+}
+
+function toggleSelected(name) {
+  if (!gallerySelected) return;
+  if (!gallerySelected.delete(name)) gallerySelected.add(name);
+  renderGallery();
+}
+
+// Deleting is only about the copy on the Mac — a path already sent to an agent
+// stops resolving, same as it would after the 30-day sweep.
+async function deleteUploads(names) {
+  if (!names.length) return;
+  const what = names.length === 1 ? fileLabel(names[0]) : `${names.length} attachments`;
+  if (!window.confirm(`Delete ${what} from the Mac?`)) return;
+  const sheet = $('gallery-sheet');
+  for (const name of names) {
+    const row = sheet.querySelector(`[data-row="${CSS.escape(name)}"]`);
+    if (row) row.style.opacity = '0.4';
+  }
+  try {
+    await api('/api/upload-delete', { method: 'POST', body: JSON.stringify({ names }) });
+    openGallery(); // re-read, so the count and the empty state stay honest
+  } catch (err) {
+    renderGallery();
+    alert(`Delete failed: ${err.message}`);
+  }
+}
+
+function openViewer(name) {
+  const el = $('viewer');
+  const url = fileUrl(name);
+  const body = IMAGE_FILE.test(name) ? `<img src="${url}" alt="">`
+    : VIDEO_FILE.test(name) ? `<video src="${url}" controls playsinline autoplay></video>`
+      : `<div class="note">No preview for this kind of file.<br>${esc(fileLabel(name))}</div>`;
+  el.innerHTML = `<div class="vw-bar">
+      <button class="btn" id="vw-close">✕</button>
+      <span class="vw-name">${esc(fileLabel(name))}</span>
+    </div>
+    <div class="vw-body">${body}</div>`;
+  // A file can be gone — deleted here, or swept after 30 days — while a chat
+  // message still names it. Say so instead of showing a blank box.
+  const media = el.querySelector('img, video');
+  if (media) {
+    media.onerror = () => {
+      el.querySelector('.vw-body').innerHTML = '<div class="note">This file is no longer on the Mac — uploads are kept 30 days.</div>';
+    };
+  }
+  el.hidden = false;
+  $('vw-close').onclick = () => {
+    el.hidden = true;
+    el.innerHTML = ''; // also stops a playing video
+  };
+}
+
+$('gallery').onclick = (e) => {
+  if (e.target === $('gallery')) closeGallery(); // tap backdrop closes
+};
+$('chat-attach').onclick = () => pickAttachment($('chat-attach'), insertPath);
+onLongPress($('chat-attach'), openGallery);
 
 $('attach-file').onchange = async () => {
   const input = $('attach-file');
@@ -1201,12 +1388,6 @@ async function sendPrompt() {
 }
 
 $('send').onclick = sendPrompt;
-$('chat-attach').onclick = () => pickAttachment($('chat-attach'), (p) => {
-  const el = $('input');
-  el.value += `${el.value && !el.value.endsWith(' ') ? ' ' : ''}${p} `;
-  el.focus();
-  renderSuggestions();
-});
 $('input').addEventListener('input', () => {
   const el = $('input');
   el.style.height = 'auto';
@@ -1314,7 +1495,15 @@ async function renderSettings() {
         </span>
       </div>
       <div class="muted">Smaller shows more of the terminal at once.</div>
+    </div>
+
+    <div class="card">
+      <div class="cfg-label">Attachments</div>
+      <div class="muted">Photos and videos this phone has uploaded to the Mac. Also reachable by holding 📎 in a session.</div>
+      <button class="bigbtn secondary" id="open-gallery">📎 Browse uploads</button>
     </div>`;
+
+  $('open-gallery').onclick = openGallery;
 
   const bumpFont = (d) => {
     const v = Math.min(16, Math.max(7, termFont() + d));

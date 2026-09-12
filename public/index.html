@@ -100,6 +100,55 @@
     .sw-row .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .sw-row .when { color: var(--dim); font-size: 12px; flex: none; }
 
+    /* attachment gallery (sheet) + full-screen viewer */
+    #gallery {
+      position: fixed; inset: 0; z-index: 45;
+      background: rgba(2, 6, 16, 0.6); backdrop-filter: blur(3px);
+      display: flex; align-items: flex-end; justify-content: center;
+    }
+    #gallery[hidden] { display: none; }
+    #gallery-sheet {
+      width: 100%; max-width: 560px; max-height: 72vh; overflow-y: auto;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 16px 16px 0 0;
+      padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
+      -webkit-overflow-scrolling: touch;
+    }
+    /* sticky so "Delete" stays reachable however far the list is scrolled */
+    .gl-hd {
+      position: sticky; top: 0; z-index: 1;
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      color: var(--muted); font-size: 12px;
+      margin: -12px -12px 0; padding: 12px 14px 8px; background: var(--bg);
+    }
+    .gl-acts { display: flex; gap: 6px; flex: none; }
+    .gl-act { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--text); }
+    .gl-act.danger { color: var(--err); border-color: var(--err); }
+    .gl-act[disabled] { opacity: 0.4; }
+    .gl-row { display: flex; align-items: stretch; gap: 6px; margin-bottom: 6px; }
+    .gl-row.sel .gl-open { background: #14342a; box-shadow: inset 0 0 0 1px var(--accent); }
+    .gl-check { flex: none; width: 20px; text-align: center; color: var(--accent); font-size: 14px; }
+    .gl-open {
+      flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; text-align: left;
+      background: var(--card); border-radius: 10px; padding: 6px 10px 6px 6px;
+    }
+    .gl-thumb {
+      flex: none; width: 44px; height: 44px; border-radius: 7px; object-fit: cover;
+      background: var(--card2); display: flex; align-items: center; justify-content: center; font-size: 20px;
+    }
+    .gl-meta { min-width: 0; }
+    .gl-meta .t { display: block; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .gl-meta .d { display: block; color: var(--dim); font-size: 11px; }
+    .gl-insert { flex: none; background: var(--card); border-radius: 10px; padding: 0 15px; color: var(--accent); font-size: 17px; font-weight: 700; }
+    .gl-del { flex: none; background: var(--card); border-radius: 10px; padding: 0 14px; font-size: 15px; opacity: 0.75; }
+    .filelink { background: rgba(52, 211, 153, 0.16); border-radius: 6px; padding: 1px 6px; color: var(--accent); font-size: 13px; word-break: break-all; }
+
+    #viewer { position: fixed; inset: 0; z-index: 50; background: #000; display: flex; flex-direction: column; }
+    #viewer[hidden] { display: none; }
+    #viewer .vw-bar { flex: none; display: flex; gap: 8px; align-items: center; padding: calc(var(--safe-top) + 8px) 12px 8px; }
+    #viewer .vw-name { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #viewer .vw-body { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 0 4px calc(var(--safe-bottom) + 8px); }
+    #viewer img, #viewer video { max-width: 100%; max-height: 100%; object-fit: contain; }
+
     /* main area */
     #view { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 12px; min-height: 0; }
     body.ws.term #view {
@@ -285,12 +334,17 @@
     <div id="switcher-sheet"></div>
   </div>
 
+  <div id="gallery" hidden>
+    <div id="gallery-sheet"></div>
+  </div>
+  <div id="viewer" hidden></div>
+
   <main id="view"></main>
 
   <div id="composer">
     <div id="suggest"></div>
     <div class="row">
-      <button id="chat-attach" title="Attach photo/video">📎</button>
+      <button id="chat-attach" title="Attach photo/video — hold to browse uploads">📎</button>
       <textarea id="input" rows="1" placeholder="Reply to agent…"></textarea>
       <button id="send">➤</button>
     </div>

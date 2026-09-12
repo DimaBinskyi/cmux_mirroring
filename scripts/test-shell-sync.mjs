@@ -30,9 +30,9 @@ console.log('scratch surface', surface);
 
 // When a case fails, `node scripts/dump-grid.mjs <surface>` shows the rows the
 // parser was looking at.
-const read = async () => {
+const read = async (opts) => {
   const g = await api(`/api/grid?surface=${encodeURIComponent(surface)}`);
-  return parseInput(g, buildRowsModel(g));
+  return parseInput(g, buildRowsModel(g), opts);
 };
 
 let failures = 0;
@@ -83,8 +83,41 @@ try {
     { leakedKeySequence: /;2;13~/.test(screen), continuation: /echo one\\/.test(screen) },
     { leakedKeySequence: false, continuation: true });
 
+  // --- Tab completion -------------------------------------------------------
+  // Two ways it used to leave the field stuck on what was typed before ⇥: zsh
+  // styles what the completion inserts (a directory's trailing "/" comes back
+  // bold, so the input no longer ends in a plain span), and an ambiguous one
+  // prints its candidates BELOW the prompt, which reads like a TUI.
+  const DIR = '/tmp/cmux-tab-test';
   await api('/api/key', { surface_id: surface, key: 'ctrl-c' });
-  await sleep(500);
+  await sleep(600);
+  await api('/api/send', { surface_id: surface, text: `mkdir -p ${DIR}/one-and-only ${DIR}/one-and-more\n` });
+  await sleep(1200);
+
+  await api('/api/send', { surface_id: surface, text: `cd ${DIR}/one-and-o` });
+  await sleep(800);
+  await api('/api/key', { surface_id: surface, key: 'tab' });
+  await sleep(1500);
+  check('a completed path is mirrored into the field', (await read())?.text, `cd ${DIR}/one-and-only/`);
+
+  await api('/api/key', { surface_id: surface, key: 'ctrl-c' });
+  await sleep(600);
+  await api('/api/send', { surface_id: surface, text: `cd ${DIR}/one-` });
+  await sleep(800);
+  await api('/api/key', { surface_id: surface, key: 'tab' });
+  await sleep(1500);
+  // How much an ambiguous ⇥ inserts is a zsh setting, so only the two things
+  // the app depends on are asserted: it still reads as a prompt, and what it
+  // reads starts with what was typed.
+  const listed = await read({ afterKey: true });
+  check('a candidate list below the prompt does not freeze the field',
+    { kind: listed?.kind, keptTyping: !!listed?.text.startsWith(`cd ${DIR}/one-`) },
+    { kind: 'shell', keptTyping: true });
+
+  await api('/api/key', { surface_id: surface, key: 'ctrl-c' });
+  await sleep(600);
+  await api('/api/send', { surface_id: surface, text: `rm -rf ${DIR}\n` });
+  await sleep(800);
 } finally {
   await api('/api/ws-action', { action: 'closeTab', surface_id: surface, workspace_id: WS });
   console.log('scratch tab closed');
