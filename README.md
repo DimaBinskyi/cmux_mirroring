@@ -100,7 +100,8 @@ forever. Switch to password mode:
    }
    ```
 
-3. `cmux reload-config` — no restart needed.
+3. `cmux config check` — confirms the file still parses and lists the keys it
+   picked up — then `cmux reload-config`. No restart needed.
 
 Check: `ls -l ~/.local/state/cmux/socket-control-password` exists and is mode
 `600`. (If you would rather not keep it on disk, put the same password in the
@@ -135,6 +136,7 @@ file, or cmux is not running). Fix it here — every step below assumes it is tr
 ### 4. Keep it running (launchd)
 
 ```sh
+mkdir -p ~/Library/LaunchAgents      # absent on a Mac that has never had one
 cp cmux-mirroring.plist.example ~/Library/LaunchAgents/com.cmux-mirroring.plist
 # edit both placeholders inside: /path/to/node (`which node`) and
 # /path/to/cmux_mirroring (`pwd`)
@@ -211,7 +213,9 @@ in `~/.config/cmux/cmux.json` — the same file as step 2, alongside `automation
 }
 ```
 
-Point the path at your clone (`~` is expanded). Then `cmux reload-config`.
+Point the path at your clone (`~` is expanded); the block sits at the top level
+of the same object as `automation`. Then `cmux config check` and
+`cmux reload-config`.
 
 The hook classifies each notification by its text, prefixes the title with
 🚨 needs-input / ⚠️ error / ✅ finished / 🤖 background — that emoji is what the
