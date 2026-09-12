@@ -45,13 +45,24 @@ over CDP (`scripts/lib/cdp.mjs`) — no extra dependency.
 | `lib/push.mjs` | VAPID keys, subscriptions, notification feed |
 | `public/app.js` | the whole client: routing, rendering, polling |
 | `public/term-input.mjs` | pure functions — grid → input line, field edit → pty ops |
+| `hooks/cmux-notify.py` | cmux notification hook → `/api/notify`; registered in `~/.config/cmux/cmux.json` |
 
 ## Gotchas
 
+- **cmux socket control must be in password mode.** `~/.config/cmux/cmux.json` needs
+  `automation.socketControlMode: "password"`; the default `cmuxOnly` only accepts cmux
+  descendants, so the launchd agent and its CLI fallback are both rejected and
+  `/api/status` reports `cmuxOnline: false` with an empty sidebar. Running the server by
+  hand from a cmux terminal hides this — that process *is* a descendant.
 - **Shipping a client change** means bumping `APP_VERSION` in `public/app.js` *and* `CACHE` in
   `public/sw.js`, and adding any new `public/` file to that file's `SHELL` list.
 - **A new file extension needs a MIME entry in `server.mjs`.** Browsers reject a module served
-  as `application/octet-stream`, and the app fails to boot with no obvious cause.
+  as `application/octet-stream`, and the app fails to boot with no obvious cause. Uploads have
+  their own table (`UPLOAD_MIME`) — a type missing there just won't preview.
+- **A stale headless Chromium silently invalidates every browser test.** `scripts/lib/cdp.mjs`
+  takes whatever is on port 9333, so a leftover shell from an earlier run answers instead, with
+  its old service-worker cache: tests then pass or fail against a build you are not editing.
+  `pkill -f chrome-headless-shell` first; the app version in Settings tells you which build ran.
 - **Never put literal ESC or DEL bytes in source** — write `\u001B` / `\u007F`. Literal control
   characters are invisible in diffs and break exact-match editing.
 - **Newlines are terminal-specific.** The Claude composer wants `shift+enter`; a shell wants
@@ -67,7 +78,8 @@ over CDP (`scripts/lib/cdp.mjs`) — no extra dependency.
 - **The launchd label installed here is `com.dmytro.cmux-mirroring`**, not the
   `com.cmux-mirroring` used in `cmux-mirroring.plist.example` and the README.
 - `data/` is gitignored and holds the VAPID keys, push subscriptions and uploads. Deleting it
-  re-keys push, and every phone has to subscribe again.
+  re-keys push, and every phone has to subscribe again. `data/uploads/` is swept on a 30-day
+  TTL (`sweepUploads`, at startup and daily), so paths in older transcripts stop resolving.
 
 ## Style
 

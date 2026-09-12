@@ -14,6 +14,14 @@
   </array>
   <key>WorkingDirectory</key>
   <string>/path/to/cmux_mirroring</string>
+  <!-- Uncomment to override defaults (see the README's env table). Needed when
+       cmux is not at /Applications/cmux.app: launchd hands the agent a bare
+       /usr/bin:/bin:/usr/sbin:/sbin PATH, so a cmux CLI elsewhere is not found.
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CMUX_BIN</key><string>/opt/homebrew/bin/cmux</string>
+  </dict>
+  -->
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
