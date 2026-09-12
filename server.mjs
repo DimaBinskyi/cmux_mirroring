@@ -176,8 +176,8 @@ async function handleApi(req, res, url) {
     };
 
     // Live mode (default) carries only the visible viewport — small and fast.
-    // full=1 additionally includes styled scrollback (used as a frozen snapshot
-    // when the user scrolls up; it is never live-polled).
+    // full=1 additionally includes styled scrollback, which the client switches
+    // to when the user scrolls up and keeps polling from there.
     const includeScrollback = q.get('full') === '1';
     const sbRows = includeScrollback ? g.scrollback_rows : 0;
     const total = sbRows + g.rows;
@@ -423,6 +423,7 @@ async function handleApi(req, res, url) {
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8', // modules are rejected without it
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json',
   '.webmanifest': 'application/manifest+json',

@@ -11,10 +11,11 @@ works in any browser.
   roll-up, ✕ to close a workspace in place, ＋ to create one.
 - **Terminal view (default)**: the real pane rendered with full colors via cmux's
   render grid. Live mode carries only the visible screen (~20KB full, ~1KB row
-  deltas, 150ms adaptive polling); scrolling up swaps to a frozen styled snapshot
-  with scrollback — nothing moves while you read, select, or copy. 🔍 search
-  across scrollback with ▲/▼ hit navigation; "▲ All" loads up to 10k lines of
-  plain-text history.
+  deltas, 150ms adaptive polling); scrolling up pulls in the styled scrollback and
+  keeps updating, holding your reading position. Repaints pause while you are
+  actually scrolling or selecting, and the column you scroll to sideways is yours
+  until ⌄ takes you back to live. 🔍 search across scrollback with ▲/▼ hit
+  navigation; "▲ All" loads up to 10k lines of plain-text history.
 - **Tabs, not splits**: every cmux tab *and* split shows as a chip. Chips update
   live when tabs are created/closed on the Mac, each has its own ✕ (with
   confirmation), and ＋ opens a new tab and switches to it.
@@ -22,7 +23,10 @@ works in any browser.
   in both directions. Typing echoes locally and streams to the pty (batched,
   cursor-aware — mid-line edits, word-delete, selection replace, paste all land
   exactly where the terminal cursor is). ↑ recalls history into both. Enter adds
-  a newline (Meta+Enter in the Claude composer); only the ⏎ button submits.
+  a newline in both, sent the way that terminal wants one (`shift+enter` in the
+  Claude composer, backslash+CR at a shell prompt); only the ⏎ button submits.
+  While a menu or dialog owns the keyboard — `/model`, a permission prompt — the
+  field holds your draft instead of filling with what's on screen.
 - **Key bar**: esc ⇥ ⇧⇥ arrows ^C ⏎, plus ⌄⌨ to hide the keyboard.
 - **Chat view**: the Claude Code conversation rendered as chat — markdown,
   collapsed tool calls, permission prompts as Allow/Deny cards, composer with
@@ -54,7 +58,7 @@ Prerequisites on the Mac:
 - [cmux](https://cmux.io) installed and running (the server talks to its control
   socket at `~/.local/state/cmux/cmux.sock`; the socket password is read
   automatically from `~/.local/state/cmux/socket-control-password`).
-- Node.js 20+.
+- Node.js 20+ (the browser tests below need 22+: `fs.globSync` and a global `WebSocket`).
 - [Tailscale](https://tailscale.com) (free tier is fine), signed in.
 
 Prerequisites on the phone:
@@ -112,8 +116,36 @@ per-category in Settings; everything else is treated as silent background info.
   version; no reinstall. Only if the manifest identity changes (app name/icons)
   do you need to re-add the icon.
 - **Mac:** `git pull && npm install` then restart the server:
-  `launchctl kickstart -k gui/$(id -u)/com.cmux-mirroring`
-  (or restart your `node server.mjs`).
+  `launchctl kickstart -k gui/$(id -u)/<your-plist-Label>`
+  (or restart your `node server.mjs`). The label is whatever `Label` you put in the
+  plist — `com.cmux-mirroring` if you copied the example verbatim. `launchctl list
+  | grep cmux` will tell you.
+
+Client changes ship only if `APP_VERSION` in `public/app.js` and `CACHE` in
+`public/sw.js` are both bumped; a new file under `public/` also needs adding to the
+`SHELL` list in `public/sw.js` and a MIME entry in `server.mjs`.
+
+## Tests
+
+Both halves of the terminal view are read back off a live terminal rather than
+mocked, because that is the only place their failures appear: the input binding
+is parsed out of the rendered grid (a blank line mid-prompt, a trailing space, a
+wrapped line, an open `/model` menu each break it differently), and the scroll
+behaviour only misbehaves against real repaints and real touch momentum. The
+server must be running.
+
+```sh
+node scripts/test-input-sync.mjs <surface-id>   # Claude composer; use an IDLE one
+node scripts/test-shell-sync.mjs <workspace-id> # shell prompt, in a scratch tab
+node scripts/test-scroll.mjs <workspace-id>     # touch scrolling, headless Chromium
+node scripts/smoke-browser.mjs <workspace-id> --type  # app loads, typing reaches the pty
+node scripts/dump-grid.mjs <surface-id>         # what the parser sees, row by row
+```
+
+Surface and workspace ids come from `curl -s localhost:4488/api/state`. The
+composer test types into the surface you name and clears it again; it never
+submits. The browser tests use the headless Chromium that ships with Playwright,
+driven over CDP (`scripts/lib/cdp.mjs`) — no extra dependency.
 
 ## Notes
 

@@ -1,7 +1,11 @@
 // cmux on the phone — vanilla ES module, no build step.
 // Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
 
-const APP_VERSION = 'v39'; // keep in sync with sw.js CACHE
+import {
+  lineText, buildRowsModel, parseInput, computeEdit, normalizeLines,
+} from './term-input.mjs';
+
+const APP_VERSION = 'v42'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -34,7 +38,30 @@ let lastFullMode = false; // whether the last grid fetch included scrollback
 let stickBottom = true;
 let historyMode = false; // full plain-text history loaded instead of the live styled grid
 let lastGridChangeTs = Date.now();
-let programmaticScrollTs = 0;
+// The last scroll position we set ourselves. Scroll events that land exactly on
+// it are our own repaint talking, not the user — a time window was tried first
+// and it silently broke scrolling up while the terminal was producing output,
+// because every repaint refreshed the window.
+let autoScrollTop = -1;
+
+function setScrollTop(el, top) {
+  el.scrollTop = top;
+  autoScrollTop = el.scrollTop; // whatever the browser clamped it to
+}
+
+// iOS keeps scrolling after the finger lifts. Swapping the rows out mid-flick
+// makes the pane jump — the browser drops the scroll position we restore right
+// after — so repaints wait for the gesture and its momentum to finish.
+let touchActive = false;
+let gestureUntil = 0;
+let pendingPaint = null;
+// Scrolling is only a reading position if the user actually did it. Layout can
+// move the pane on its own (web fonts landing after the first paint), and that
+// used to drop the view into scrollback the moment it opened.
+let lastGestureTs = 0;
+
+const gestureBusy = () => touchActive || Date.now() < gestureUntil;
+const userScrolling = () => touchActive || Date.now() - lastGestureTs < 2000;
 
 // Custom server address (Settings): empty = the origin the app was loaded from.
 const BASE = (localStorage.getItem('cmux-server') || '').replace(/\/+$/, '');
@@ -521,6 +548,10 @@ async function cardKey(key) {
 // ---------------------------------------------------------------- terminal
 function renderTerm() {
   const w = ws();
+  clearTimeout(pendingPaint); // the pane is about to be replaced
+  touchActive = false;
+  gestureUntil = 0;
+  inputKind = null; // re-detected from this pane's first repaint
   const keys = TERM_KEYS.map(([k, label]) => `<button class="btn" data-tkey="${k}">${label}</button>`).join('');
   $('view').innerHTML = `
     ${chipsHtml(w)}
@@ -583,12 +614,17 @@ function renderTerm() {
     $('jump-live').hidden = false;
     pollGrid(true); // pull styled scrollback in; updates keep flowing
   };
+  let lastScrollTop = screen.scrollTop;
   screen.onscroll = () => {
-    if (historyMode) return;
-    // Ignore the scroll events our own repaint/jump-to-bottom generates —
-    // they used to bounce the view straight back into scrollback mode,
-    // which is why returning to live took two taps.
-    if (Date.now() - programmaticScrollTs < 600) return;
+    // Scrolling sideways is not a mode change: reading a long line must not
+    // snap the view back to live.
+    const top = screen.scrollTop;
+    const movedDown = top !== lastScrollTop;
+    lastScrollTop = top;
+    if (historyMode || !movedDown) return;
+    // Our own repaint scrolling back to the bottom: not a reading position.
+    if (top === autoScrollTop || !userScrolling()) return;
+    if (!touchActive) gestureUntil = Date.now() + 250; // momentum still running
     const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 40;
     if (!atBottom && stickBottom) enterScrollback();
     else if (atBottom && !stickBottom && !S.searchOpen) {
@@ -601,13 +637,18 @@ function renderTerm() {
   // handler can't fire — catch the upward intent directly: mouse wheel up
   // near the top, or a touch pull-down at the top.
   screen.addEventListener('wheel', (e) => {
+    lastGestureTs = Date.now();
     if (!historyMode && e.deltaY < 0 && screen.scrollTop < 80) enterScrollback();
   }, { passive: true });
+  screen.addEventListener('pointerdown', () => { lastGestureTs = Date.now(); }, { passive: true });
   let touchStartY = null;
   screen.addEventListener('touchstart', (e) => {
     touchStartY = e.touches[0]?.clientY ?? null;
+    touchActive = true;
+    lastGestureTs = Date.now();
   }, { passive: true });
   screen.addEventListener('touchmove', (e) => {
+    lastGestureTs = Date.now();
     if (touchStartY === null || historyMode) return;
     const dy = (e.touches[0]?.clientY ?? touchStartY) - touchStartY;
     if (dy > 40 && screen.scrollTop <= 0) {
@@ -615,6 +656,12 @@ function renderTerm() {
       enterScrollback();
     }
   }, { passive: true });
+  for (const ev of ['touchend', 'touchcancel']) {
+    screen.addEventListener(ev, () => {
+      touchActive = false;
+      gestureUntil = Date.now() + 350; // let the flick coast before repainting
+    }, { passive: true });
+  }
 
   bindTermInput();
   autosizeInput();
@@ -672,17 +719,6 @@ async function pollGrid(force) {
   }
 }
 
-function lineText(spans) {
-  let line = '';
-  let col = 0;
-  for (const s of spans) {
-    if (s.column > col) line += ' '.repeat(s.column - col);
-    line += s.text;
-    col = s.column + (s.cell_width || [...s.text].length);
-  }
-  return line;
-}
-
 function spanHtml(s, g) {
   const st = g.styles[s.style_id] || {};
   let fg = st.fg || g.fg;
@@ -704,20 +740,16 @@ function spanHtml(s, g) {
 
 let prevLines = null;
 
-function buildRowsModel(g) {
-  const total = g.scrollbackRows + g.rows;
-  const arr = Array.from({ length: total }, () => []);
-  for (const s of g.scrollback) arr[s.row]?.push(s);
-  for (const s of g.viewport) arr[g.scrollbackRows + s.row]?.push(s);
-  for (const r of arr) r.sort((a, b) => a.column - b.column);
-  return arr;
-}
-
 const termFont = () => Math.min(16, Math.max(7, parseFloat(localStorage.getItem('term-font') || '9.5')));
 
 function paintGrid() {
   const el = $('screen');
   if (!el || !grid || !rowsModel) return;
+  if (gestureBusy()) {
+    clearTimeout(pendingPaint);
+    pendingPaint = setTimeout(paintGrid, 120);
+    return;
+  }
   el.style.background = grid.bg;
   el.style.color = grid.fg;
   el.style.fontSize = `${termFont()}px`;
@@ -743,18 +775,19 @@ function paintGrid() {
       if (lines[i] !== prevLines[i]) kids[i].innerHTML = lines[i];
     }
   } else {
-    // Full rebuild (e.g. viewport↔scrollback mode switch): keep the reading
-    // position by preserving the distance from the bottom.
+    // Full rebuild (e.g. viewport↔scrollback mode switch): replacing the rows
+    // resets both axes, so restore the reading position — distance from the
+    // bottom vertically, exact offset horizontally.
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const left = el.scrollLeft;
     el.innerHTML = lines.map((l) => `<div class="tl">${l}</div>`).join('');
-    if (!stickBottom) el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - Math.max(0, dist));
+    if (!stickBottom) setScrollTop(el, Math.max(0, el.scrollHeight - el.clientHeight - Math.max(0, dist)));
+    el.scrollLeft = left;
   }
   prevLines = lines;
-  if (stickBottom) {
-    programmaticScrollTs = Date.now();
-    el.scrollTop = el.scrollHeight;
-    el.scrollLeft = 0;
-  }
+  // Stay glued to the newest output. The horizontal offset is left alone — it
+  // belongs to the user; only "back to live" (⌄) returns to the left edge.
+  if (stickBottom) setScrollTop(el, el.scrollHeight);
   if (S.search) applySearch();
   syncFieldFromTerminal(true);
   updateTermSuggest();
@@ -796,10 +829,9 @@ function updateTermSuggest() {
 // Back to the bottom + viewport-only live mode; closes history/search state.
 function goLive() {
   const screen = $('screen');
-  programmaticScrollTs = Date.now();
   if (screen) {
     screen.scrollLeft = 0; // back to the left edge, not just the bottom
-    screen.scrollTop = screen.scrollHeight;
+    setScrollTop(screen, screen.scrollHeight);
   }
   historyMode = false;
   const toggle = $('full-history');
@@ -985,14 +1017,6 @@ function nudgeCaret(dir) {
   }
 }
 
-// Mirror the terminal's current input line into the field.
-// Two shapes are recognized:
-//  - Claude Code composer: a "❯ " line, possibly wrapped onto indented rows
-//    (styled bold, so style-based detection won't work — parse by shape).
-//  - Shell prompt: prompt is colored/bold, typed input is default-styled —
-//    the input is the trailing run of plainly-styled spans on the cursor row.
-// auto=true runs on every repaint (mirrors Mac-side typing / recalls) but
-// backs off while the user is typing into the field or a flush is pending.
 let fieldPrev = ''; // the input-line text the pty currently agrees with
 
 // Keep the composer tall enough to read and easy to tap: grows with content
@@ -1016,145 +1040,61 @@ function setField(ti, text) {
   }
 }
 
-// Turn any field edit (word-delete, selection replace, paste, autocorrect…)
-// into the minimal pty edit. Cursor-aware: ptyCaret tracks where the pty's
-// cursor sits within the input text (arrow keys move it), the edit region is
-// bounded by common prefix+suffix, and the pty cursor is walked to the right
-// edge of that region with arrow-key escape sequences before DELs + retype.
+// Where the pty's cursor sits within the input text; arrow keys move it and
+// every edit is expressed relative to it.
 let ptyCaret = 0;
 
+// What the pane's input line is, last time we could tell — it decides how a
+// newline is sent (the composer and a shell want different things; see
+// computeEdit). Sticky, because the sync backs off while the user types, and
+// reset per pane so a previous tab's answer can't leak. Until it is known the
+// shell form is used: it is merely imperfect in the composer, where shift+enter
+// in a shell would spray an escape sequence into the command line.
+let inputKind = null;
+
 function diffAndSend(newValue) {
-  // On a slash-command line, newlines stay in the field only: forwarding one
-  // makes Claude execute the command. Both sides of the diff use the same
-  // model so the pty stays consistent with what we actually sent.
-  const isSlash = newValue.trimStart().startsWith('/');
-  const model = (t) => (isSlash ? t.replace(/\n/g, '') : t);
-  const oldCp = [...model(fieldPrev)];
-  const newCp = [...model(newValue)];
-  let p = 0;
-  while (p < oldCp.length && p < newCp.length && oldCp[p] === newCp[p]) p += 1;
-  let sfx = 0;
-  while (sfx < oldCp.length - p && sfx < newCp.length - p
-    && oldCp[oldCp.length - 1 - sfx] === newCp[newCp.length - 1 - sfx]) sfx += 1;
-  const removed = oldCp.length - p - sfx;
-  const inserted = newCp.slice(p, newCp.length - sfx).join('');
+  const lineBreak = inputKind === 'composer' ? 'key' : 'escape';
+  const { ops, caret } = computeEdit(fieldPrev, newValue, ptyCaret, { lineBreak });
   fieldPrev = newValue;
-  if (!removed && !inserted) return;
-  const target = p + removed; // pty cursor must sit at the right edge of the removal
-  const delta = target - ptyCaret;
-  const RIGHT = '\u001B[C';
-  const LEFT = '\u001B[D';
-  // Newlines go out as backslash+CR — the documented Claude Code line-break
-  // (zsh treats it as line continuation too). ESC+CR or plain \n would submit.
-  const insertedPty = inserted.replace(/\n/g, '\\\r');
-  const ops = (delta > 0 ? RIGHT.repeat(delta) : LEFT.repeat(-delta))
-    + '\u007F'.repeat(removed)
-    + insertedPty;
-  queueOp('text', ops);
-  ptyCaret = p + [...inserted].length;
+  ptyCaret = caret;
+  for (const op of ops) queueOp(op.t, op.v);
 }
 
+// Mirror the terminal's input line into the field (see parseInput for the
+// shapes it recognizes). auto=true runs on every repaint — that is what shows
+// Mac-side typing and history recalls on the phone — but backs off while the
+// user is typing here or a flush is pending.
 function syncFieldFromTerminal(auto = false) {
   const ti = $('terminput');
-  if (!ti || !grid || !grid.cursor) return;
-  // Back off only while the user is actively typing here (field focus alone
-  // must not gate it — the field keeps focus even while the user types on the
-  // Mac). cursor.visible is false on unfocused panes, so it can't gate either.
+  if (!ti || !grid || !rowsModel) return;
+  // Field focus must not gate this: the field keeps focus even while the user
+  // types on the Mac. cursor.visible is false on unfocused panes, so it can't
+  // gate it either.
   if (auto && (opQueue.length || flushing || Date.now() - lastLocalInputTs < 1500)) return;
-  if (!rowsModel) return;
-
-  // Viewport rows live at the tail of rowsModel (after deltas, grid.viewport
-  // itself is stale — rowsModel is the source of truth).
-  const isFaint = (s) => (grid.styles[s.style_id] || {}).faint;
-  const vrow = (r) => (rowsModel[grid.scrollbackRows + r] || []).filter((s) => !isFaint(s)); // faint = placeholders/hints, never input
-  const rowText = (r) => lineText(vrow(r));
-  const r = grid.cursor.row;
-
-  // Claude composer block: find the "❯ " row at or above the cursor; rows in
-  // between must be indented continuations of the wrapped input.
-  let startRow = -1;
-  for (let i = r; i >= Math.max(0, r - 8); i -= 1) {
-    const t = rowText(i);
-    if (/^\s*❯\s?/.test(t)) {
-      startRow = i;
-      break;
-    }
-    if (!t.trim()) break;
-    if (i !== r && !/^\s/.test(t)) break;
-  }
-  // Chars after the pty cursor on its row → caret position within the input.
-  const cursorRowLen = [...lineText(vrow(r)).replace(/\s+$/, '')].length;
-  const tailAfterCursor = Math.max(0, cursorRowLen - grid.cursor.column);
-
-  if (startRow >= 0) {
-    // Rebuild the composer text row by row. A row reaching the terminal's
-    // right edge was WRAPPED (join with nothing); a row ending early was a
-    // real line break (join with a newline) — that distinction preserves the
-    // user's own formatting. The composer's 2-space continuation indent is a
-    // rendering artifact and is stripped.
-    let out = '';
-    for (let i = startRow; i <= r; i += 1) {
-      const raw = rowText(i).replace(/\s+$/, '');
-      const wrapped = [...raw].length >= grid.columns - 8;
-      let t = raw;
-      if (i === startRow) t = t.replace(/^\s*\u276F\s?/, '');
-      else t = t.replace(/^\s{1,2}/, '');
-      out += t;
-      if (i < r) out += wrapped ? '' : '\n';
-    }
-    syncSet(ti, out, tailAfterCursor);
-    return;
-  }
-  if (auto) {
-    // Shell 2-way binding, guarded so TUI content (vim, dialogs) never leaks
-    // into the field: the cursor row must look like a prompt line AND be the
-    // last row with content (shells park the cursor at the bottom; TUIs don't).
-    const t = rowText(r);
-    if (!/[❯➜›»$%#>]/.test(t.slice(0, 40))) return;
-    for (let i = grid.rows - 1; i > r; i -= 1) {
-      if (rowText(i).trim()) return;
-    }
-  }
-
-  const spans = vrow(r);
-  if (!spans.length) return;
-  const plain = (s) => {
-    const st = grid.styles[s.style_id] || {};
-    return (!st.fg || st.fg.toLowerCase() === grid.fg.toLowerCase())
-      && (!st.bg || st.bg.toLowerCase() === grid.bg.toLowerCase())
-      && !st.bold && !st.inverse && !st.italic;
-  };
-  let start = spans.length;
-  while (start > 0 && plain(spans[start - 1])) start -= 1;
-  if (start === spans.length) return; // no plain tail — leave the field alone
-  const text = lineText(spans.slice(start))
-    .replace(/^\s+/, '')
-    .replace(/^[❯>$%#]\s?/, '')
-    .replace(/\s*│\s*$/, '');
-  syncSet(ti, text, tailAfterCursor);
+  const parsed = parseInput(grid, rowsModel);
+  // 'busy' means a dialog or menu owns the keyboard (/model, a permission
+  // prompt, any TUI) — the field must keep whatever the user has drafted.
+  if (!parsed || parsed.kind === 'busy') return;
+  inputKind = parsed.kind;
+  syncSet(ti, parsed.text, parsed.tail);
 }
 
-// Erasing repaints old cells as spaces, so grid lines carry phantom trailing
-// whitespace we can't tell apart from a real typed trailing space. Sync
-// ignores trailing whitespace: if field and terminal agree modulo it, leave
-// the field alone; otherwise write the trimmed version. The caret estimate
-// follows the terminal's actual cursor position.
-function syncSet(ti, text, tailAfterCursor = 0) {
-  const bare = (x) => x.replace(/\s+$/, '');
-  const t = bare(text);
-  if (t !== bare(ti.value)) {
-    setField(ti, t);
-    ptyCaret = Math.max(0, [...t].length - tailAfterCursor);
+// Erasing repaints old cells as spaces, so the grid cannot tell a typed
+// trailing space from an erase artifact. Compare ignoring trailing whitespace
+// per line: if field and terminal agree that far the FIELD is authoritative (it
+// may hold real trailing spaces) and the user's caret is left alone; otherwise
+// the terminal wins and the caret follows its cursor.
+function syncSet(ti, text, tail = 0) {
+  if (normalizeLines(text) !== normalizeLines(ti.value)) {
+    setField(ti, text);
+    ptyCaret = Math.max(0, [...text].length - tail);
     try {
       ti.setSelectionRange(ptyCaret, ptyCaret);
     } catch {
       /* not focused */
     }
   } else {
-    // Equal modulo trailing spaces: the field is authoritative (it may hold a
-    // real trailing space the grid can't distinguish from erase artifacts) —
-    // update the caret estimate from the field and DON'T move the user's caret.
-    ptyCaret = Math.max(0, [...ti.value].length - tailAfterCursor);
+    ptyCaret = Math.max(0, [...ti.value].length - tail);
   }
 }
 
