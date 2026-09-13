@@ -9,6 +9,12 @@ works in any browser.
 - **Home = the cmux sidebar**: every workspace with live status (🚨 needs input /
   ⚙️ working / ✅ done / 💤 idle), current activity, groups with worst-status
   roll-up, ✕ to close a workspace in place, ＋ to create one.
+- **Link state and the Mac's battery, in the title bar**: one dot — green
+  *Connected*, amber *cmux offline* (the Mac answers, cmux is not running), red
+  *Disconnected* — next to the Mac's own battery, percent and whether it is
+  charging, which is the one thing that can end every session at once while you
+  are away from it. Inside a session the tabs need the room, so only the dot
+  stays. Read from `pmset` once a minute and pushed over SSE when it changes.
 - **Terminal view (default)**: the real pane rendered with full colors via cmux's
   render grid. Live mode carries only the visible screen (~20KB full, ~1KB row
   deltas, 150ms adaptive polling); scrolling up pulls in the styled scrollback and
@@ -31,8 +37,10 @@ works in any browser.
 - **Chat view**: the Claude Code conversation rendered as chat — markdown,
   collapsed tool calls, permission prompts as Allow/Deny cards, composer with
   slash-command suggestions.
-- **Attachments**: 📎 picks a photo/video on the phone, uploads it to the Mac
-  (`data/uploads/`), and inserts the file path into the prompt for the agent.
+- **Attachments**: 📎 picks anything on the phone — camera, library or Files —
+  uploads it to the Mac (`data/uploads/`) with a progress bar, and inserts the
+  file path into the prompt for the agent. HEIC is transcoded on arrival, since
+  Claude cannot read it; what it still cannot open is marked "stored only".
   Hold 📎 (or Settings → Browse uploads) to look through everything uploaded —
   tap to view it full-screen, ＋ to reuse its path, 🗑 to delete it, hold a row
   to select several and delete them in one go — and any uploaded path in the

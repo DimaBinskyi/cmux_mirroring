@@ -5,7 +5,7 @@ import {
   lineText, buildRowsModel, parseInput, computeEdit, normalizeLines, caretInField,
 } from './term-input.mjs';
 
-const APP_VERSION = 'v52'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v56'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -22,6 +22,7 @@ const TERM_KEYS = [
 
 const S = {
   snap: null,
+  battery: null, // the Mac's, mirrored over SSE — Safari has no battery API of its own
   route: { name: 'home', wsId: null },
   tab: 'term',
   surface: null,
@@ -60,9 +61,23 @@ let pendingPaint = null;
 // move the pane on its own (web fonts landing after the first paint), and that
 // used to drop the view into scrollback the moment it opened.
 let lastGestureTs = 0;
+// Touching the pane is not scrolling it. Leaving scrollback can trust a plain
+// touch — the flick that brought you back to the bottom is still coasting — but
+// ENTERING it must not, or a tap on the pane leaves a two-second window in which
+// any scroll the layout causes reads as "the user scrolled up". That is what
+// dropped the pane into scrollback a second after a tap, on the frame the input
+// field grew a line, with the full-scrollback refetch and the jumping that
+// follows from it.
+let lastMoveTs = 0;
+// A pane resize is not a gesture either, and the scroll it settles into can
+// arrive a frame or two later, so exact-position matching alone cannot rule it
+// out. Resizes are discrete and rare, unlike repaints, so a short window after
+// one is safe here in a way a window around every repaint would not be.
+let resizeUntil = 0;
 
 const gestureBusy = () => touchActive || Date.now() < gestureUntil;
 const userScrolling = () => touchActive || Date.now() - lastGestureTs < 2000;
+const userDragging = () => touchActive || Date.now() - lastMoveTs < 2000;
 
 // Custom server address (Settings): empty = the origin the app was loaded from.
 const BASE = (localStorage.getItem('cmux-server') || '').replace(/\/+$/, '');
@@ -117,17 +132,52 @@ window.addEventListener('hashchange', () => {
   render();
 });
 
+// ------------------------------------------------------------------- status
+// Two separate failures the one dot used to blur together: the Mac not
+// answering at all (asleep, off the tailnet) and the Mac answering while cmux
+// itself is down. They need different things from the user, so they say
+// different things here.
+let linkUp = false; // the Mac answered us the last time we asked
+
+function connStatus() {
+  if (!linkUp) return { cls: 'bad', label: 'Disconnected' };
+  if (!S.snap?.online) return { cls: 'warn', label: 'cmux offline' };
+  return { cls: 'ok', label: 'Connected' };
+}
+
+// Room in the bar is the constraint, so the icon carries the charging state and
+// the percent carries the rest. 🔌 is a battery the Mac is holding rather than
+// filling ("AC attached; not charging"), which is not the same as charged.
+function batteryHtml() {
+  const b = S.battery;
+  if (!b) return '';
+  if (!b.present) return b.ac ? '🔌 AC' : ''; // a Mac with no battery to mirror
+  const icon = b.charging ? '⚡️' : b.ac ? '🔌' : '🔋';
+  const text = `${icon} ${b.percent}%`;
+  return !b.ac && b.percent <= 20 ? `<span class="low">${text}</span>` : text;
+}
+
+function setLink(up) {
+  linkUp = !!up;
+  const { cls, label } = connStatus();
+  const dot = $('dot');
+  if (dot) dot.className = `dot ${cls}`;
+  const note = $('link-note');
+  if (note) note.textContent = label;
+  const batt = $('hdr-batt');
+  if (batt) {
+    batt.innerHTML = batteryHtml();
+    batt.classList.toggle('stale', !linkUp);
+  }
+}
+
 // --------------------------------------------------------------------- SSE
 let chatRefetchTimer = null;
-
-function setDot(on) {
-  const dot = $('dot');
-  if (dot) dot.classList.toggle('on', !!on);
-}
 
 function connectSSE() {
   if (S.es) S.es.close();
   S.es = new EventSource(`${BASE}/api/stream`);
+  S.es.onopen = () => setLink(true);
   S.es.onmessage = (e) => {
     let msg;
     try {
@@ -135,9 +185,15 @@ function connectSSE() {
     } catch {
       return;
     }
+    if (msg.type === 'battery') {
+      S.battery = msg.battery;
+      setLink(true);
+      return;
+    }
     if (msg.type === 'state') {
       S.snap = msg.snapshot;
-      setDot(msg.snapshot.online);
+      if (msg.snapshot.battery) S.battery = msg.snapshot.battery;
+      setLink(true);
       if (S.route.name === 'home') renderHome();
       if (S.route.name === 'ws') {
         updateChips(); // tabs created/closed on the Mac appear live
@@ -151,7 +207,7 @@ function connectSSE() {
       renderFeed();
     }
   };
-  S.es.onerror = () => setDot(false);
+  S.es.onerror = () => setLink(false);
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -164,10 +220,11 @@ document.addEventListener('visibilitychange', () => {
 async function refreshSnapshot() {
   try {
     S.snap = await api('/api/state');
-    setDot(S.snap.online);
+    if (S.snap.battery) S.battery = S.snap.battery;
+    setLink(true);
     render();
   } catch {
-    setDot(false);
+    setLink(false);
   }
 }
 
@@ -242,14 +299,15 @@ function render() {
   $('nav-feed').classList.toggle('active', S.route.name === 'feed');
   $('nav-settings').classList.toggle('active', S.route.name === 'settings');
 
+  setLink(linkUp); // the bar carries the link state and the battery on every view
   if (S.route.name === 'home') {
-    $('title').innerHTML = `cmux mirroring <span id="dot" class="${S.snap?.online ? 'on' : ''}"></span>`;
+    $('title').textContent = 'cmux mirroring';
     renderHome();
   } else if (S.route.name === 'feed') {
-    $('title').innerHTML = `Feed <span id="dot" class="${S.snap?.online ? 'on' : ''}"></span>`;
+    $('title').textContent = 'Feed';
     renderFeed();
   } else if (S.route.name === 'settings') {
-    $('title').innerHTML = `Settings <span id="dot" class="${S.snap?.online ? 'on' : ''}"></span>`;
+    $('title').textContent = 'Settings';
     renderSettings();
   } else {
     renderWs();
@@ -559,6 +617,30 @@ async function cardKey(key) {
 }
 
 // ---------------------------------------------------------------- terminal
+// The pane's bottom edge is the live edge, and it moves while you type: the
+// field below grows a line whenever a long command wraps, and iOS resizes the
+// visible viewport around the keyboard. Nothing re-pinned the text to that edge
+// except the next repaint, up to 150ms later, so the pane first swallowed its
+// bottom row and then snapped it back up — measurably ~66ms of the text sitting
+// in the wrong place, and that snap is the jump you can see. A ResizeObserver
+// runs after layout and before paint, so the correction now lands in the same
+// frame as the resize: the bottom row tracks the edge instead of chasing it.
+let paneHeight = 0;
+
+const paneResize = new ResizeObserver(() => {
+  const el = $('screen');
+  if (!el) return;
+  const prev = paneHeight;
+  paneHeight = el.clientHeight;
+  if (!prev || !paneHeight || prev === paneHeight) return; // first sighting, or a hidden pane
+  // Everything that follows from this resize — our re-pin, the engine settling
+  // after it, the refetch a different row count triggers — is the layout, not a
+  // reader. See resizeUntil.
+  resizeUntil = Date.now() + 600;
+  if (stickBottom && !historyMode) setScrollTop(el, el.scrollHeight);
+  else setScrollTop(el, el.scrollTop + (prev - paneHeight)); // same bottom row, shorter pane
+});
+
 function renderTerm() {
   const w = ws();
   clearTimeout(pendingPaint); // the pane is about to be replaced
@@ -618,6 +700,9 @@ function renderTerm() {
   $('jump-live').onclick = goLive;
 
   const screen = $('screen');
+  paneHeight = 0; // a new element: the old height says nothing about this one
+  paneResize.disconnect();
+  paneResize.observe(screen);
   const enterScrollback = () => {
     if (!stickBottom) return;
     stickBottom = false;
@@ -633,10 +718,24 @@ function renderTerm() {
     lastScrollTop = top;
     if (historyMode || !movedDown) return;
     // Our own repaint scrolling back to the bottom: not a reading position.
-    if (top === autoScrollTop || !userScrolling()) return;
+    if (top === autoScrollTop) return;
+    const off = screen.scrollHeight - top - screen.clientHeight;
+    // In live mode the pane belongs on the live edge, so a scroll nobody asked
+    // for — the layout settling after a resize, the engine re-clamping — is put
+    // back at once instead of leaving the view parked off the bottom until the
+    // next content change, which on an idle session can be minutes. Only when it
+    // is a real departure: a few pixels of disagreement with the engine must be
+    // left alone, or correcting it becomes its own oscillation.
+    if (stickBottom && off > 40 && !userDragging()) {
+      setScrollTop(screen, screen.scrollHeight);
+      return;
+    }
+    if (!userScrolling()) return;
+    // The pane just changed size — this is the layout settling, not a reader.
+    if (Date.now() < resizeUntil) return;
     if (!touchActive) gestureUntil = Date.now() + 250; // momentum still running
-    const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 40;
-    if (!atBottom && stickBottom) enterScrollback();
+    const atBottom = off < 40;
+    if (!atBottom && stickBottom && userDragging()) enterScrollback();
     else if (atBottom && !stickBottom && !S.searchOpen) {
       stickBottom = true;
       $('jump-live').hidden = true;
@@ -648,6 +747,7 @@ function renderTerm() {
   // near the top, or a touch pull-down at the top.
   screen.addEventListener('wheel', (e) => {
     lastGestureTs = Date.now();
+    lastMoveTs = Date.now();
     if (!historyMode && e.deltaY < 0 && screen.scrollTop < 80) enterScrollback();
   }, { passive: true });
   screen.addEventListener('pointerdown', () => { lastGestureTs = Date.now(); }, { passive: true });
@@ -659,6 +759,7 @@ function renderTerm() {
   }, { passive: true });
   screen.addEventListener('touchmove', (e) => {
     lastGestureTs = Date.now();
+    lastMoveTs = Date.now();
     if (touchStartY === null || historyMode) return;
     const dy = (e.touches[0]?.clientY ?? touchStartY) - touchStartY;
     if (dy > 40 && screen.scrollTop <= 0) {
@@ -787,6 +888,19 @@ let prevLines = null;
 
 const termFont = () => Math.min(16, Math.max(7, parseFloat(localStorage.getItem('term-font') || '9.5')));
 
+// Rows live in a box inside the pane rather than in the pane itself — see
+// #gridrows in index.html for what goes wrong when the scroll container is the
+// flex box. Anything that replaces the pane's contents (an error, full history)
+// drops it, so it is recreated on demand rather than assumed.
+function rowsHost(el) {
+  let host = el.firstElementChild;
+  if (!host || host.id !== 'gridrows') {
+    el.innerHTML = '<div id="gridrows"></div>';
+    host = el.firstElementChild;
+  }
+  return host;
+}
+
 function paintGrid() {
   const el = $('screen');
   if (!el || !grid || !rowsModel) return;
@@ -812,7 +926,8 @@ function paintGrid() {
 
   // Diff per line: typical updates touch a handful of rows, so patching only
   // those keeps repaints cheap and scroll/selection stable.
-  const kids = el.children;
+  const host = rowsHost(el);
+  const kids = host.children;
   const canDiff = prevLines && prevLines.length === lines.length
     && kids.length === lines.length && kids[0]?.classList.contains('tl');
   if (canDiff) {
@@ -825,7 +940,7 @@ function paintGrid() {
     // bottom vertically, exact offset horizontally.
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     const left = el.scrollLeft;
-    el.innerHTML = lines.map((l) => `<div class="tl">${l}</div>`).join('');
+    host.innerHTML = lines.map((l) => `<div class="tl">${l}</div>`).join('');
     if (!stickBottom) setScrollTop(el, Math.max(0, el.scrollHeight - el.clientHeight - Math.max(0, dist)));
     el.scrollLeft = left;
   }
@@ -1066,11 +1181,41 @@ let fieldPrev = ''; // the input-line text the pty currently agrees with
 
 // Keep the composer tall enough to read and easy to tap: grows with content
 // (up to ~6 lines) and never collapses below a comfortable 2-line box.
+let fieldLen = 0;
+let fieldLines = 0;
+
 function autosizeInput() {
   const ti = $('terminput');
   if (!ti) return;
+  const len = ti.value.length;
+  const nl = (ti.value.match(/\n/g) || []).length;
+  // Measuring means collapsing the box to one row and reading it back, which
+  // makes the terminal pane above briefly that much taller — the whole field's
+  // height, so the taller the field the bigger the disturbance. Only pay for it
+  // when the answer can have changed: the text overflows the box (needs to grow)
+  // or it lost characters or a line (may need to shrink). An unset inline height
+  // means this is the first call for a fresh field, which always measures.
+  const mayShrink = len < fieldLen || nl < fieldLines;
+  fieldLen = len;
+  fieldLines = nl;
+  if (ti.style.height && !mayShrink && ti.scrollHeight <= ti.clientHeight) return;
+  // Collapsing the box makes the terminal pane above it taller for the duration
+  // of the measurement, and the browser clamps the pane's scroll position to
+  // that taller box. Putting the height back does NOT put the scroll back:
+  // Blink restores it (scroll anchoring), WebKit has no such thing, so on the
+  // phone the pane was left scrolled up by exactly the height of the field and
+  // the next repaint snapped it down again. That is the jump, and its size is
+  // the field's — 8px at one line, 35px at three — which is why more lines made
+  // it worse. Restoring here, in the same task, means it never reaches a paint.
+  const pane = $('screen');
+  const keep = pane ? pane.scrollTop : 0;
   ti.style.height = 'auto';
   ti.style.height = `${Math.min(Math.max(ti.scrollHeight, 46), 132)}px`;
+  if (!pane) return;
+  // Reading the geometry flushes the layout the line above invalidated, so this
+  // is the pane at its real size again, not the collapsed one.
+  const restored = Math.min(keep, Math.max(0, pane.scrollHeight - pane.clientHeight));
+  if (pane.scrollTop !== restored) setScrollTop(pane, restored);
 }
 
 function setField(ti, text) {
@@ -1712,29 +1857,51 @@ if (window.visualViewport) {
   // the home-indicator strip → the reported bottom gap). Keyboard open: track
   // the visual viewport so the bars ride above the keyboard.
   const kbOpen = () => vv.height < Math.max(window.innerHeight, maxH) - 100;
-  const apply = () => {
+  let applied = { kb: null, top: 0, h: null };
+  // settled=false is the live event; true is the re-apply after iOS has stopped
+  // animating. vv.offsetTop spikes for a frame or two whenever iOS nudges the
+  // view to keep the caret in sight, and iOS puts it back itself — following
+  // that spike moved the whole shell down and straight back up, which is the
+  // app twitching as a whole while you type (measured at ±20px in a screen
+  // recording, every band on screen moving together). The height is honoured
+  // immediately, since the bars have to stay above the keyboard; the offset
+  // waits until it has held still.
+  const apply = (settled = false) => {
     maxH = Math.max(maxH, vv.height);
     const kb = kbOpen();
-    if (kb) {
-      // keyboard: size to the visible area so the bars ride above it
-      document.body.style.height = `${Math.round(vv.height)}px`;
-      document.body.style.bottom = 'auto';
-      document.body.style.top = `${Math.round(vv.offsetTop)}px`;
-    } else {
-      // Keyboard closed: hand the layout back to CSS (top/bottom inset:0),
-      // so the browser picks the real bottom edge instead of a JS guess.
-      document.body.style.bottom = '';
-      document.body.style.height = '';
-      document.body.style.top = '';
+    const top = kb ? (settled ? Math.round(vv.offsetTop) : applied.top) : 0;
+    const h = kb ? Math.round(vv.height) : 0;
+    // Only write when the viewport actually moved. iOS fires resize and scroll
+    // several times per keystroke, and every write here resizes the app shell —
+    // which the terminal pane absorbs, being the one element that flexes. With
+    // the writes held to real changes, a keystroke that did not move the
+    // viewport cannot move the pane, whatever iOS reports in between.
+    if (kb !== applied.kb || top !== applied.top || h !== applied.h) {
+      applied = { kb, top, h };
+      if (kb) {
+        // keyboard: size to the visible area so the bars ride above it
+        document.body.style.height = `${h}px`;
+        document.body.style.bottom = 'auto';
+        document.body.style.top = `${top}px`;
+      } else {
+        // Keyboard closed: hand the layout back to CSS (top/bottom inset:0),
+        // so the browser picks the real bottom edge instead of a JS guess.
+        document.body.style.bottom = '';
+        document.body.style.height = '';
+        document.body.style.top = '';
+      }
+      document.body.classList.toggle('kb-open', kb);
     }
-    document.body.classList.toggle('kb-open', kb);
-    window.scrollTo(0, 0);
+    // Undo an iOS scroll that pushed the fixed shell out of frame — but only
+    // when there is one: scrollTo is itself a visual-viewport scroll event, so
+    // calling it unconditionally kept this handler feeding itself.
+    if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
   };
   const fitViewport = () => {
     apply();
     // iOS fires resize mid-animation; re-apply after it settles
     for (const t of settleTimers) clearTimeout(t);
-    settleTimers = [250, 600].map((ms) => setTimeout(apply, ms));
+    settleTimers = [250, 600].map((ms) => setTimeout(() => apply(true), ms));
   };
   vv.addEventListener('resize', fitViewport);
   vv.addEventListener('scroll', fitViewport);

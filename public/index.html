@@ -66,9 +66,22 @@
     }
     #back { font-size: 20px; padding: 4px 10px 4px 0; color: var(--accent); display: none; }
     #topbar.ws #back { display: block; }
-    #title { font-weight: 700; font-size: 16px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    #dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); margin-left: 6px; vertical-align: 1px; }
-    #dot.on { background: var(--accent); }
+    #title { font-weight: 700; font-size: 16px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* link state and the Mac's battery ride in the bar itself; in a session the
+       tabs need that room, so only the dot stays. */
+    #link-note { flex: none; color: var(--dim); font-size: 11px; font-weight: 600; }
+    #hdr-batt { flex: none; color: var(--muted); font-size: 12px; }
+    /* Nothing has refreshed it since the link dropped: a last-known reading. */
+    #hdr-batt.stale { opacity: 0.45; }
+    #hdr-batt .low { color: var(--err); }
+    #topbar.ws #link-note, #topbar.ws #hdr-batt { display: none; }
+    /* one dot, three meanings: green = the Mac answers and cmux is up, amber =
+       the Mac answers but cmux is not running, red = nothing is reaching it. */
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+    .dot.ok { background: var(--accent); }
+    .dot.warn { background: var(--warn); }
+    .dot.bad { background: var(--err); }
+    #dot { flex: none; }
     #tabs { display: none; gap: 4px; }
     #topbar.ws #tabs { display: flex; }
     #tabs button { padding: 5px 14px; border-radius: 8px; color: var(--muted); font-weight: 600; font-size: 13px; }
@@ -272,18 +285,21 @@
       font: 9.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
       -webkit-overflow-scrolling: touch;
       user-select: text; -webkit-user-select: text;
-      display: flex; flex-direction: column;
     }
     /* A pty shorter than the pane — the normal state once the keyboard closes and
-       the pane grows back — used to sit at the top with the prompt stranded above
-       a slab of empty rows. The auto margin pushes the grid to the bottom, where
-       a terminal's live edge belongs; once the grid does overflow, the margin
-       resolves to 0 and the pane scrolls from the top exactly as before.
-       justify-content: flex-end would do the same but makes the overflowing top
-       unreachable in WebKit. */
-    #screen::before { content: ''; margin-top: auto; }
-    /* Rows must not shrink to fit the flex container, or an overflowing grid
-       would squeeze instead of scroll. */
+       the pane grows back — would otherwise sit at the top with the prompt
+       stranded above a slab of empty rows. This box bottom-aligns it; once the
+       grid is taller it simply grows and the pane scrolls from the top as before.
+       The flex layout sits on this wrapper rather than on #screen so that
+       justify-content can be used plainly: a wrapper never overflows, it grows,
+       whereas flex-end on the scroll container itself strands the overflowing
+       top out of reach in WebKit. (It replaced an auto-margin ::before on
+       #screen that did the same job; that was rewritten while chasing a jump
+       which turned out to be autosizeInput clamping this pane's scroll —
+       see the comment there — not anything to do with this layout.) */
+    #gridrows { min-height: 100%; display: flex; flex-direction: column; justify-content: flex-end; }
+    /* Rows must not shrink to fit the flex box, or an overflowing grid would
+       squeeze instead of scroll. */
     #screen .tl { white-space: pre; min-height: 1.35em; flex: none; }
     #screen .tl.hitline { background: rgba(245, 158, 11, 0.28); border-radius: 3px; }
     #screen .tl.hitline.current { outline: 2px solid var(--warn); outline-offset: -1px; background: rgba(245, 158, 11, 0.45); }
@@ -351,7 +367,10 @@
 <body>
   <header id="topbar">
     <button id="back">‹</button>
-    <div id="title">cmux <span id="dot"></span></div>
+    <div id="title">cmux</div>
+    <span id="dot" class="dot"></span>
+    <span id="link-note"></span>
+    <span id="hdr-batt"></span>
     <div id="tabs">
       <button data-tab="term">Term</button>
       <button data-tab="chat">Chat</button>

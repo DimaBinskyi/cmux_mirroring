@@ -51,10 +51,47 @@ function broadcast(type, data) {
   for (const res of sseClients) res.write(frame);
 }
 
-state.on('state', (snapshot) => broadcast('state', { snapshot }));
+// ---------------------------------------------------------------- Mac battery
+// The one thing that can end every session at once while nobody is at the Mac,
+// and the phone has no other way to see it coming. `pmset` ships with macOS and
+// costs ~10ms, so a minute between reads is plenty for a number that moves at
+// percent-per-several-minutes. A Mac with no battery reports only its power
+// source, which is `present: false` here and simply reads as plugged in.
+let battery = { present: false, ac: true };
+
+function readBattery() {
+  return new Promise((resolve) => {
+    execFile('pmset', ['-g', 'batt'], { timeout: 5000 }, (err, out) => {
+      if (err) return resolve(null); // not macOS, or pmset refused — keep the last value
+      const ac = /drawing from 'AC Power'/i.test(out);
+      const m = out.match(/(\d+)%;\s*([^;]+);/);
+      if (!m) return resolve({ present: false, ac });
+      // "not charging" is a plugged-in battery the Mac is deliberately holding,
+      // so the test has to be anchored or the substring makes it read as charging.
+      const status = m[2].trim();
+      resolve({ present: true, percent: Number(m[1]), charging: /^(charging|finishing charge)/i.test(status), ac });
+    });
+  });
+}
+
+async function refreshBattery() {
+  const next = await readBattery();
+  if (!next) return;
+  const changed = JSON.stringify(next) !== JSON.stringify(battery);
+  battery = next;
+  // Its own frame, not a state broadcast: the workspace list has not changed,
+  // and re-sending it would repaint the session list once a minute for nothing.
+  if (changed) broadcast('battery', { battery });
+}
+
+const snapshot = () => ({ ...state.snapshot(), battery });
+
+state.on('state', (snap) => broadcast('state', { snapshot: { ...snap, battery } }));
 setInterval(() => {
   for (const res of sseClients) res.write(': ping\n\n');
 }, 25_000).unref();
+refreshBattery();
+setInterval(refreshBattery, 60_000).unref();
 
 // ------------------------------------------------------------------- helpers
 function readBody(req) {
@@ -213,7 +250,7 @@ async function handleApi(req, res, url) {
   const q = url.searchParams;
 
   if (req.method === 'GET' && url.pathname === '/api/state') {
-    return sendJson(res, 200, state.snapshot());
+    return sendJson(res, 200, snapshot());
   }
 
   if (req.method === 'GET' && url.pathname === '/api/stream') {
@@ -224,7 +261,7 @@ async function handleApi(req, res, url) {
       'X-Accel-Buffering': 'no',
       ...CORS,
     });
-    res.write(`data: ${JSON.stringify({ type: 'state', snapshot: state.snapshot() })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'state', snapshot: snapshot() })}\n\n`);
     sseClients.add(res);
     req.on('close', () => sseClients.delete(res));
     return undefined;
