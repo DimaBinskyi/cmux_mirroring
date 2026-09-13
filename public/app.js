@@ -5,7 +5,7 @@ import {
   lineText, buildRowsModel, parseInput, computeEdit, normalizeLines, caretInField,
 } from './term-input.mjs';
 
-const APP_VERSION = 'v45'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v52'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -35,6 +35,7 @@ const S = {
 let grid = null;
 let rowsModel = null; // array of per-row span lists; full responses rebuild it, deltas patch it
 let lastFullMode = false; // whether the last grid fetch included scrollback
+let lastFit = -1; // rows requested last time; a change resizes the model, so no delta
 let stickBottom = true;
 let historyMode = false; // full plain-text history loaded instead of the live styled grid
 let lastGridChangeTs = Date.now();
@@ -581,7 +582,7 @@ function renderTerm() {
       </div>
       <div id="keysbar">
         <div class="keysrow-line"><button class="btn" id="kb-hide" title="Hide keyboard">⌄⌨</button>${keys}</div>
-        <div class="keysrow-line"><button class="btn" id="term-attach" title="Attach photo/video — hold to browse uploads">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button><button class="btn" id="send-line" title="Send">⏎</button></div>
+        <div class="keysrow-line"><button class="btn" id="term-attach" title="Attach a photo, video or file — hold to browse uploads">📎</button><button class="btn" id="search-toggle">🔍</button><button class="btn" id="full-history">${historyMode ? '🎨 Color' : '▲ All'}</button><button class="btn" id="send-line" title="Send">⏎</button></div>
       </div>
       <textarea id="terminput" rows="1" placeholder="⌨ Type here — Enter = new line, ⏎ sends"
         autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
@@ -676,8 +677,10 @@ function renderTerm() {
   autosizeInput();
   prevLines = null;
   pollGrid(true);
-  // Adaptive poll: 200ms while the screen is actively changing, easing to 1s
-  // when it's been quiet. Unchanged polls cost ~60 bytes (revision check).
+  // Adaptive poll: 150ms while the screen is actively changing, easing to 1s
+  // when it's been quiet. A poll that changed nothing costs ~60 bytes (an empty
+  // delta) and, since pollGrid leaves lastGridChangeTs alone for those, does not
+  // hold the loop at the fast rate.
   const loop = () => {
     if (S.route.name !== 'ws' || S.tab !== 'term') return;
     const active = Date.now() - lastGridChangeTs < 10_000;
@@ -694,24 +697,54 @@ function selectionInScreen() {
   return sel && !sel.isCollapsed && $('screen')?.contains(sel.anchorNode);
 }
 
+// The control socket re-serialises the cursor with its keys in a different order
+// on every call, so comparing the JSON always reports a change. Only row and
+// column are ever read — `visible` also flaps with pane focus (see below).
+const sameCursor = (a, b) => !!a && !!b && a.row === b.row && a.column === b.column;
+
+// How many panes' worth of rows to keep loaded in live mode. One is what shows;
+// the rest sits above it so a scroll up lands on real text immediately. Without
+// it the first flick up hits blank rows and waits on the full-scrollback fetch —
+// ~141KB over Tailscale against ~62KB for this, and the fetch still starts the
+// moment the scroll does, so the spare pane only has to cover that round trip.
+const PRELOAD_PANES = 2;
+
+// Rows the pane can show. The pty is usually shorter than the pane on a phone,
+// so this is what the server tops up from scrollback — one row more than fits,
+// so rounding leaves a part-row to scroll rather than a blank sliver.
+function paneFit() {
+  const el = $('screen');
+  if (!el || !el.clientHeight) return 0;
+  const rowH = termFont() * 1.35; // matches #screen's line-height
+  return (Math.floor((el.clientHeight - 16) / rowH) + 1) * PRELOAD_PANES; // 16 = the pane's padding
+}
+
 async function pollGrid(force) {
   if (S.route.name !== 'ws' || S.tab !== 'term' || !S.surface || historyMode) return;
   // Always live — pause only while searching or selecting text to copy.
   if (!force && (S.searchOpen || selectionInScreen())) return;
   try {
-    // At the bottom: viewport only (small + fast). Scrolled up: include the
-    // styled scrollback and KEEP updating — live everywhere.
+    // At the bottom: viewport plus just enough scrollback to fill the pane.
+    // Scrolled up: the whole styled scrollback, and KEEP updating — live everywhere.
     const full = !stickBottom;
-    const since = grid && rowsModel && lastFullMode === full ? `&since=${encodeURIComponent(grid.seq)}` : '';
-    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${full ? '&full=1' : ''}${since}`);
+    const fit = full ? 0 : paneFit();
+    const sameShape = lastFullMode === full && lastFit === fit;
+    const since = grid && rowsModel && sameShape ? `&since=${encodeURIComponent(grid.seq)}` : '';
+    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${full ? '&full=1' : `&fit=${fit}`}${since}`);
     if (g.unchanged) {
       // Fresh view (e.g. after a tab switch) with an unchanged revision:
       // repaint from the cached model or the screen stays blank forever.
       if (prevLines === null && rowsModel) paintGrid();
       return;
     }
-    lastGridChangeTs = Date.now();
-    if (g.delta && grid && rowsModel && lastFullMode === full) {
+    let quiet = false;
+    if (g.delta && grid && rowsModel && sameShape) {
+      // cmux stamps a fresh render_revision on every replay, so a poll where
+      // nothing happened still arrives as a delta carrying an empty `changed`
+      // — the usual case on an idle surface (24 polls in 25, measured). Counting
+      // that as activity pinned the poll loop at 150ms and rebuilt every line
+      // string seven times a second for a screen that had not moved.
+      quiet = prevLines !== null && !Object.keys(g.changed).length && sameCursor(grid.cursor, g.cursor);
       grid.seq = g.seq;
       grid.cursor = g.cursor;
       Object.assign(grid.styles, g.styles);
@@ -721,6 +754,9 @@ async function pollGrid(force) {
       rowsModel = buildRowsModel(g);
     }
     lastFullMode = full;
+    lastFit = fit;
+    if (quiet) return;
+    lastGridChangeTs = Date.now();
     paintGrid();
   } catch (err) {
     const el = $('screen');
@@ -1142,14 +1178,19 @@ function bindTermInput() {
 }
 
 // -------------------------------------------------------------- attachments
-// Photo/video from the phone: uploads to the Mac, then the saved file path is
-// inserted into the prompt so the agent can open it (images are readable by
-// Claude; videos just land on the Mac). Everything uploaded stays browsable —
-// tap 📎 to add one, hold it to look at what has already gone over.
+// Anything from the phone — camera, library, Files — uploads to the Mac, then the
+// saved file path is inserted into the prompt so the agent can open it. Not every
+// type is one Claude can read (see AGENT_READS); the rest just land on the Mac,
+// and the gallery says so rather than letting you find out from the agent.
+// Tap 📎 to add, hold it to look at what has already gone over.
 let attachHandler = null;
 
 const IMAGE_FILE = /\.(jpe?g|png|gif|webp|heic|heif|avif|bmp)$/i;
 const VIDEO_FILE = /\.(mov|mp4|m4v|webm)$/i;
+// What the agent can actually open with Read. HEIC and AVIF are images the phone
+// previews happily and Claude cannot decode, so they are deliberately absent —
+// new uploads get transcoded server-side, but older ones are still in the list.
+const AGENT_READS = /\.(jpe?g|png|gif|webp|bmp|pdf|txt|md|json|csv|log|xml|ya?ml|html?|[cm]?js|ts|py|sh|rs|go|java|rb|php|css|toml|ini|env|sql|diff|patch)$/i;
 // Uploads are saved as "<epoch-ms>-<original name>"; the stamp is noise to read.
 const fileLabel = (name) => String(name).replace(/^\d{10,}-/, '');
 const fileUrl = (name) => `${BASE}/api/upload-file?name=${encodeURIComponent(name)}`;
@@ -1162,6 +1203,10 @@ function fmtSize(bytes) {
   return `${n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
 }
 
+// Tap 📎 and iOS offers library / camera / Files itself; hold it for what has
+// already been uploaded. Anything of ours in front of that sheet is a second menu
+// on top of a menu — and only the camera could ever have skipped Safari's, which
+// is not worth an extra tap on the other two.
 function pickAttachment(btn, onPath) {
   attachHandler = { btn, onPath, label: btn.textContent };
   $('attach-file').click();
@@ -1209,7 +1254,7 @@ async function openGallery() {
 function renderGallery() {
   const sheet = $('gallery-sheet');
   if (!galleryFiles.length) {
-    sheet.innerHTML = '<div class="note">Nothing attached yet — 📎 uploads a photo or video from this phone.</div>';
+    sheet.innerHTML = '<div class="note">Nothing attached yet — 📎 sends a photo, video or file from this phone.</div>';
     return;
   }
   const picked = gallerySelected;
@@ -1229,12 +1274,15 @@ function renderGallery() {
       const thumb = IMAGE_FILE.test(f.name)
         ? `<img class="gl-thumb" src="${fileUrl(f.name)}" loading="lazy" alt="">`
         : `<span class="gl-thumb">${VIDEO_FILE.test(f.name) ? '🎞' : '📄'}</span>`;
+      // Inserting the path of something the agent cannot open looks identical to
+      // inserting one it can, right up until the agent says it cannot read it.
+      const tag = AGENT_READS.test(f.name) ? '' : '<span class="gl-tag">stored only</span>';
       const on = !!picked?.has(f.name);
       return `<div class="gl-row${on ? ' sel' : ''}" data-row="${esc(f.name)}">
         <button class="gl-open" data-file="${esc(f.name)}">
           ${picked ? `<span class="gl-check">${on ? '✓' : '○'}</span>` : ''}${thumb}
           <span class="gl-meta"><span class="t">${esc(fileLabel(f.name))}</span>
-            <span class="d">${relTime(f.mtime)} · ${fmtSize(f.size)}</span></span>
+            <span class="d">${relTime(f.mtime)} · ${fmtSize(f.size)}${tag}</span></span>
         </button>
         ${canInsert ? `<button class="gl-insert" data-insert="${esc(f.path)}" title="Insert path">＋</button>` : ''}
         ${picked ? '' : `<button class="gl-del" data-del="${esc(f.name)}" title="Delete">🗑</button>`}
@@ -1328,30 +1376,67 @@ $('gallery').onclick = (e) => {
 $('chat-attach').onclick = () => pickAttachment($('chat-attach'), insertPath);
 onLongPress($('chat-attach'), openGallery);
 
-$('attach-file').onchange = async () => {
+$('attach-file').onchange = () => {
   const input = $('attach-file');
-  const file = input.files?.[0];
-  input.value = '';
-  if (!file || !attachHandler) return;
+  const files = [...(input.files || [])];
+  input.value = ''; // so picking the same photo twice in a row still fires
+  uploadFiles(files);
+};
+
+// fetch() gives no upload progress, and these go over Tailscale — a 300 MB video
+// with a frozen 📎 and no bar is indistinguishable from a hung app.
+function putFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${BASE}/api/upload?name=${encodeURIComponent(file.name)}`);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* non-JSON body → generic error below */ }
+      if (xhr.status === 200 && data.path) resolve(data);
+      else reject(new Error(data.error || `server said ${xhr.status}`));
+    };
+    // The server aborts the socket past its 300 MB cap, which lands here rather
+    // than as a status — the size is the only explanation worth offering.
+    xhr.onerror = () => reject(new Error(file.size > 300 * 1024 * 1024 ? 'over the 300 MB limit' : 'connection lost'));
+    xhr.onabort = () => reject(new Error('cancelled'));
+    xhr.send(file);
+  });
+}
+
+// One at a time: parallel uploads from a phone just make every bar crawl, and a
+// failure part-way through should still leave the paths that did land in the
+// prompt rather than throwing the batch away.
+async function uploadFiles(files) {
+  if (!files.length || !attachHandler) return;
   const { btn, onPath, label } = attachHandler;
   attachHandler = null;
+  const bar = $('uploading');
+  const failed = [];
   btn.textContent = '⏳';
   btn.disabled = true;
-  try {
-    const r = await fetch(`${BASE}/api/upload?name=${encodeURIComponent(file.name)}`, {
-      method: 'POST',
-      body: file,
-    });
-    const data = await r.json();
-    if (!r.ok || !data.path) throw new Error(data.error || 'upload failed');
-    onPath(data.path);
-  } catch (err) {
-    alert(`Upload failed: ${err.message}`);
-  } finally {
-    btn.textContent = label;
-    btn.disabled = false;
+  bar.hidden = false;
+  for (const [i, file] of files.entries()) {
+    const count = files.length > 1 ? ` (${i + 1}/${files.length})` : '';
+    $('up-name').textContent = file.name + count;
+    $('up-pct').textContent = '0%';
+    $('up-fill').style.width = '0%';
+    try {
+      const data = await putFile(file, (frac) => {
+        const pct = Math.round(frac * 100);
+        $('up-pct').textContent = `${pct}%`;
+        $('up-fill').style.width = `${pct}%`;
+      });
+      onPath(data.path);
+    } catch (err) {
+      failed.push(`${file.name}: ${err.message}`);
+    }
   }
-};
+  bar.hidden = true;
+  btn.textContent = label;
+  btn.disabled = false;
+  if (failed.length) alert(`Upload failed —\n${failed.join('\n')}`);
+}
 
 // ---------------------------------------------------------------- composer
 function renderSuggestions() {
@@ -1499,7 +1584,7 @@ async function renderSettings() {
 
     <div class="card">
       <div class="cfg-label">Attachments</div>
-      <div class="muted">Photos and videos this phone has uploaded to the Mac. Also reachable by holding 📎 in a session.</div>
+      <div class="muted">Photos, videos and files this phone has uploaded to the Mac. Also reachable by holding 📎 in a session.</div>
       <button class="bigbtn secondary" id="open-gallery">📎 Browse uploads</button>
     </div>`;
 

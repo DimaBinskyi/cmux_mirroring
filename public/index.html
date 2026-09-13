@@ -86,7 +86,9 @@
     #switcher-sheet {
       width: 100%; max-width: 560px; max-height: 65vh; overflow-y: auto;
       background: var(--bg); border: 1px solid var(--border); border-radius: 16px 16px 0 0;
-      padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
+      /* --safe-bottom, not the raw inset: 34px of home-indicator clearance under
+         the last row is the dead strip the variable exists to avoid. */
+      padding: 12px 12px calc(var(--safe-bottom) + 10px);
       -webkit-overflow-scrolling: touch;
     }
     .sw-row {
@@ -100,6 +102,19 @@
     .sw-row .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .sw-row .when { color: var(--dim); font-size: 12px; flex: none; }
 
+    /* upload progress: a strip, not a modal — a 300 MB video over Tailscale
+       should not lock the app while it goes. */
+    #uploading {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 47;
+      padding: 8px 12px calc(var(--safe-bottom) + 8px);
+      background: rgba(15, 23, 42, 0.96); border-top: 1px solid var(--border);
+    }
+    #uploading[hidden] { display: none; }
+    .up-t { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .up-t span:first-child { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .up-track { height: 4px; border-radius: 3px; background: var(--card2); overflow: hidden; }
+    .up-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.15s linear; }
+
     /* attachment gallery (sheet) + full-screen viewer */
     #gallery {
       position: fixed; inset: 0; z-index: 45;
@@ -110,7 +125,9 @@
     #gallery-sheet {
       width: 100%; max-width: 560px; max-height: 72vh; overflow-y: auto;
       background: var(--bg); border: 1px solid var(--border); border-radius: 16px 16px 0 0;
-      padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
+      /* Rows carry their own 6px margin, so this only has to clear the home
+         indicator — see --safe-bottom, which caps that at 12px. */
+      padding: 12px 12px calc(var(--safe-bottom) + 4px);
       -webkit-overflow-scrolling: touch;
     }
     /* sticky so "Delete" stays reachable however far the list is scrolled */
@@ -138,6 +155,7 @@
     .gl-meta { min-width: 0; }
     .gl-meta .t { display: block; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .gl-meta .d { display: block; color: var(--dim); font-size: 11px; }
+    .gl-tag { display: inline-block; background: var(--card2); border-radius: 4px; padding: 0 5px; margin-left: 5px; font-size: 10px; color: var(--muted); }
     .gl-insert { flex: none; background: var(--card); border-radius: 10px; padding: 0 15px; color: var(--accent); font-size: 17px; font-weight: 700; }
     .gl-del { flex: none; background: var(--card); border-radius: 10px; padding: 0 14px; font-size: 15px; opacity: 0.75; }
     .filelink { background: rgba(52, 211, 153, 0.16); border-radius: 6px; padding: 1px 6px; color: var(--accent); font-size: 13px; word-break: break-all; }
@@ -254,8 +272,19 @@
       font: 9.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
       -webkit-overflow-scrolling: touch;
       user-select: text; -webkit-user-select: text;
+      display: flex; flex-direction: column;
     }
-    #screen .tl { white-space: pre; min-height: 1.35em; }
+    /* A pty shorter than the pane — the normal state once the keyboard closes and
+       the pane grows back — used to sit at the top with the prompt stranded above
+       a slab of empty rows. The auto margin pushes the grid to the bottom, where
+       a terminal's live edge belongs; once the grid does overflow, the margin
+       resolves to 0 and the pane scrolls from the top exactly as before.
+       justify-content: flex-end would do the same but makes the overflowing top
+       unreachable in WebKit. */
+    #screen::before { content: ''; margin-top: auto; }
+    /* Rows must not shrink to fit the flex container, or an overflowing grid
+       would squeeze instead of scroll. */
+    #screen .tl { white-space: pre; min-height: 1.35em; flex: none; }
     #screen .tl.hitline { background: rgba(245, 158, 11, 0.28); border-radius: 3px; }
     #screen .tl.hitline.current { outline: 2px solid var(--warn); outline-offset: -1px; background: rgba(245, 158, 11, 0.45); }
     #jump-live {
@@ -339,17 +368,26 @@
   </div>
   <div id="viewer" hidden></div>
 
+  <div id="uploading" hidden>
+    <div class="up-t"><span id="up-name"></span><span id="up-pct"></span></div>
+    <div class="up-track"><div class="up-fill" id="up-fill"></div></div>
+  </div>
+
   <main id="view"></main>
 
   <div id="composer">
     <div id="suggest"></div>
     <div class="row">
-      <button id="chat-attach" title="Attach photo/video — hold to browse uploads">📎</button>
+      <button id="chat-attach" title="Attach a photo, video or file — hold to browse uploads">📎</button>
       <textarea id="input" rows="1" placeholder="Reply to agent…"></textarea>
       <button id="send">➤</button>
     </div>
   </div>
-  <input type="file" id="attach-file" accept="image/*,video/*" hidden>
+  <!-- No accept, on purpose. iOS answers a bare file input with its own sheet —
+       library / camera / Files — in the phone's language, so a sheet of ours would
+       only stack a second menu on top of it. Leaving accept off is also what lets
+       the Files entry offer documents instead of just the camera roll. -->
+  <input type="file" id="attach-file" multiple hidden>
 
   <nav id="bottomnav">
     <button data-route="#/" id="nav-sessions">Sessions</button>

@@ -11,6 +11,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
 import { rpc, rpcTry, readScreen, sendText, sendKey, cli } from './lib/cmux.mjs';
 import { CmuxState } from './lib/state.mjs';
 import { resolveTranscript, newestTranscriptForCwd, parseTranscript } from './lib/transcripts.mjs';
@@ -130,7 +131,34 @@ const UPLOAD_MIME = {
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/plain; charset=utf-8',
   '.json': 'application/json',
+  // Everything textual is served as text/plain on purpose. /api/upload-file is
+  // same-origin with the app, so handing back text/html for something picked out
+  // of the Files app would let it script the app's own origin.
+  '.csv': 'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.xml': 'text/plain; charset=utf-8',
+  '.yml': 'text/plain; charset=utf-8',
+  '.yaml': 'text/plain; charset=utf-8',
+  '.html': 'text/plain; charset=utf-8',
+  '.htm': 'text/plain; charset=utf-8',
 };
+
+// iPhones shoot HEIC and Claude cannot read it. The Photos picker usually hands
+// Safari a transcoded JPEG, but the Files picker never does — the same photo
+// arrives readable or unreadable depending on which sheet it came from, which is
+// impossible to explain to anyone. sips ships with macOS, so normalising costs no
+// dependency. The HEIC is dropped: nothing here wants it, and keeping both only
+// doubles what the 30-day sweep carries.
+function normalizeHeic(file) {
+  return new Promise((resolve) => {
+    const jpg = `${file.replace(/\.hei[cf]$/i, '')}.jpg`;
+    execFile('sips', ['-s', 'format', 'jpeg', file, '--out', jpg], (err) => {
+      if (err) return resolve(file); // not macOS, or sips refused it — keep the original
+      fs.unlink(file, () => {});
+      resolve(jpg);
+    });
+  });
+}
 
 // Phone uploads are a scratch pad, not an archive: photos and videos pile up in
 // data/ forever otherwise. Anything older than 30 days is swept at startup and
@@ -223,6 +251,10 @@ async function handleApi(req, res, url) {
     if (!g) return sendJson(res, 502, { error: 'no render grid for surface' });
     const seq = `${g.render_epoch}/${g.render_revision}/${g.row_space_revision}`;
     const since = q.get('since');
+    // Unreachable as cmux stands: render_revision counts replays, not changes, so
+    // it advances even when the screen is identical. Kept because it costs one
+    // comparison and becomes live again the day the revision tracks content — a
+    // poll where nothing moved still gets the cheap path below, an empty delta.
     if (since === seq) return sendJson(res, 200, { unchanged: true, seq });
 
     const styleDef = (id) => {
@@ -244,17 +276,34 @@ async function handleApi(req, res, url) {
     // full=1 additionally includes styled scrollback, which the client switches
     // to when the user scrolls up and keeps polling from there.
     const includeScrollback = q.get('full') === '1';
-    const sbRows = includeScrollback ? g.scrollback_rows : 0;
+    // A phone pane is routinely taller than the pty behind it (a 35-row surface
+    // in a 50-row pane), which used to leave a slab of dead space. `fit` is the
+    // row count the client can show; the difference is topped up from the newest
+    // scrollback so the screen is always full. Capped so a bad value cannot ask
+    // the socket to serialise the entire history.
+    const available = g.scrollback_rows || 0;
+    const fit = Math.max(0, Math.min(500, Number(q.get('fit')) || 0));
+    const sbRows = includeScrollback ? available : Math.max(0, Math.min(available, fit - g.rows));
+    // Rows are numbered from the oldest line kept, so a partial take starts here
+    // and is renumbered — the client indexes scrollback from 0 either way.
+    const sbOffset = available - sbRows;
+    const sbSpans = includeScrollback
+      ? g.scrollback_spans || []
+      : (sbRows ? (g.scrollback_spans || [])
+        .filter((s) => s.row >= sbOffset)
+        .map((s) => ({ ...s, row: s.row - sbOffset })) : []);
     const total = sbRows + g.rows;
     const rowsArr = Array.from({ length: total }, () => []);
-    if (includeScrollback) for (const s of g.scrollback_spans || []) rowsArr[s.row]?.push(s);
+    for (const s of sbSpans) rowsArr[s.row]?.push(s);
     for (const s of g.row_spans || []) rowsArr[sbRows + s.row]?.push(s);
     for (const r of rowsArr) r.sort((a, b) => a.column - b.column);
     const keys = rowsArr.map((r) => JSON.stringify(r.map((s) => [s.column, s.style_id, s.text])));
 
     // Delta: if the client is exactly one step behind our cache, send only the
     // rows that changed (a status-line clock tick is ~1 row instead of a grid).
-    const cacheKey = `${surface}:${includeScrollback ? 'f' : 'v'}`;
+    // The pad count is part of the key: the same surface at a different fit is a
+    // different row set, and a delta across the two would misalign every row.
+    const cacheKey = `${surface}:${includeScrollback ? 'f' : `v${sbRows}`}`;
     const prev = gridCache.get(cacheKey);
     if (since && prev && prev.seq === since && prev.keys.length === total) {
       const changed = {};
@@ -281,7 +330,7 @@ async function handleApi(req, res, url) {
     }
 
     const used = new Set();
-    for (const s of [...(includeScrollback ? g.scrollback_spans || [] : []), ...(g.row_spans || [])]) used.add(s.style_id);
+    for (const s of [...sbSpans, ...(g.row_spans || [])]) used.add(s.style_id);
     const styles = {};
     for (const id of used) {
       const def = styleDef(id);
@@ -296,7 +345,7 @@ async function handleApi(req, res, url) {
       cursor: g.cursor,
       styles,
       viewport: g.row_spans || [],
-      scrollback: includeScrollback ? g.scrollback_spans || [] : [],
+      scrollback: sbSpans,
       seq,
     });
   }
@@ -399,8 +448,9 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true, out: out.trim().slice(0, 200) });
   }
 
-  // Photo/video from the phone: raw body → file on the Mac; the client then
-  // inserts the saved path into the prompt so the agent can read it.
+  // Anything the phone attaches — camera, library or Files: raw body → file on
+  // the Mac; the client then inserts the saved path into the prompt so the agent
+  // can read it.
   if (req.method === 'POST' && url.pathname === '/api/upload') {
     const name = String(q.get('name') || 'upload.bin').replace(/[^\w.\-]+/g, '_').slice(-80);
     const dir = path.join(DATA_DIR, 'uploads');
@@ -408,10 +458,12 @@ async function handleApi(req, res, url) {
     const file = path.join(dir, `${Date.now()}-${name}`);
     const MAX = 300 * 1024 * 1024;
     let size = 0;
+    let tooBig = false;
     const stream = fs.createWriteStream(file);
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX) {
+      if (size > MAX && !tooBig) {
+        tooBig = true;
         stream.destroy();
         fs.unlink(file, () => {});
         req.destroy();
@@ -422,8 +474,13 @@ async function handleApi(req, res, url) {
       stream.on('finish', resolve);
       stream.on('error', reject);
       req.on('error', reject);
+      // An aborted over-size upload emits neither 'finish' nor 'error', so without
+      // this the request hangs here forever holding its socket.
+      req.on('close', () => tooBig && resolve());
     });
-    return sendJson(res, 200, { ok: true, path: file, size });
+    if (tooBig) return undefined; // socket is already gone — nothing left to answer
+    const saved = /\.hei[cf]$/i.test(file) ? await normalizeHeic(file) : file;
+    return sendJson(res, 200, { ok: true, path: saved, name: path.basename(saved), size });
   }
 
   // What this phone has uploaded, newest first — the app's attachment gallery.
@@ -462,6 +519,9 @@ async function handleApi(req, res, url) {
     if (!st.isFile()) return sendJson(res, 404, { error: 'not found' });
     const head = {
       'Content-Type': UPLOAD_MIME[path.extname(name).toLowerCase()] || 'application/octet-stream',
+      // The Files picker can put any type in here, so keep the browser from
+      // sniffing its way past the type chosen above.
+      'X-Content-Type-Options': 'nosniff',
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'private, max-age=3600', // names carry a timestamp, so they never change
       ...CORS,
