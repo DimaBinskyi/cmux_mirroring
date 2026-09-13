@@ -5,6 +5,14 @@
 // Bound to 127.0.0.1 only; `tailscale serve` terminates HTTPS on the tailnet
 // and proxies here. The notify hook posts to /api/notify on localhost.
 
+// libuv sizes its thread pool on first use, and the default of 4 is one macOS
+// privacy dialog away from wedging every asynchronous file operation here: a
+// TCC-blocked call holds its thread until someone answers a prompt they cannot
+// see. lib/files.mjs stops those piling up; this makes the few that get through
+// survivable. It runs after the imports below — none of which touch the pool —
+// and the launchd plist sets the same variable for the installed agent.
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
+
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,6 +24,7 @@ import { rpc, rpcTry, readScreen, sendText, sendKey, cli } from './lib/cmux.mjs'
 import { CmuxState } from './lib/state.mjs';
 import { resolveTranscript, newestTranscriptForCwd, parseTranscript } from './lib/transcripts.mjs';
 import { PushService } from './lib/push.mjs';
+import * as files from './lib/files.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -28,6 +37,10 @@ const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'https://github.com/DimaBinsk
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const push = new PushService(DATA_DIR, VAPID_SUBJECT);
+// Reading the Mac's files is the one thing here that is worth more than the
+// tailnet boundary, so it carries its own key (data/fs-key) instead of riding
+// on "only my devices can reach this host".
+const FS_KEY = files.ensureKey(DATA_DIR);
 const state = new CmuxState(path.join(DATA_DIR, 'events-cursor'), (msg) => console.error(msg));
 const gridCache = new Map(); // surface id -> {seq, keys[]} for /api/grid deltas
 const watchers = new Map(); // client id -> {wsId, ts} — sessions actively viewed on a phone
@@ -112,12 +125,16 @@ function readBody(req) {
   });
 }
 
-// CORS: the PWA may be configured to call a different host:port than the one
-// it was installed from (Settings → server address). Exposure is tailnet-only.
+// CORS: kept from when the PWA could be pointed at a different host:port than
+// the one it was installed from (Settings → server address, removed — the same
+// process serves both halves). Exposure is tailnet-only, and /api/fs/* has its
+// own key; tightening this to same-origin is the next thing worth doing here.
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  // x-fs-key is what makes a file-browser call a preflighted one; without it
+  // here the browser never sends the request that carries the key.
+  'Access-Control-Allow-Headers': 'Content-Type, X-Fs-Key',
 };
 
 function sendJson(res, status, value) {
@@ -245,9 +262,130 @@ function findWorkspace(id) {
   return state.workspaces.find((w) => w.id === id || w.ref === id);
 }
 
+// Stream a file, honouring Range — iOS will not play a <video> without it, and
+// a big file should start showing before it has all arrived.
+function serveFile(req, res, file, st, head) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+  if (m && (m[1] || m[2])) {
+    const start = m[1] ? Number(m[1]) : Math.max(0, st.size - Number(m[2]));
+    const end = m[1] ? Math.min(m[2] ? Number(m[2]) : st.size - 1, st.size - 1) : st.size - 1;
+    if (start > end || start >= st.size) {
+      res.writeHead(416, { 'Content-Range': `bytes */${st.size}`, ...CORS });
+      return res.end();
+    }
+    res.writeHead(206, { ...head, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1 });
+    return fs.createReadStream(file, { start, end }).pipe(res);
+  }
+  res.writeHead(200, { ...head, 'Content-Length': st.size });
+  return fs.createReadStream(file).pipe(res);
+}
+
+// ------------------------------------------------------------- file browser
+// Read-only, home-confined, key-gated (see lib/files.mjs for the confinement
+// and the deny-list). Listings are one level per request: nothing here walks a
+// tree, so a big directory costs one readdir and a capped number of stats.
+
+// What to say when macOS silently refuses to let this process read a folder.
+// The folder is named because the fix is per-folder and the user is on a phone,
+// away from the Mac where the dialog they never saw appeared.
+function stalledMessage(abs) {
+  return `macOS has not granted this server access to ${files.display(abs)}. On the Mac:`
+    + ' System Settings → Privacy & Security → Full Disk Access → add your node binary'
+    + ' (`which node`), then restart the agent and tap Try again.';
+}
+
+// A stall can surface from any of the three calls below — statting ~/Desktop
+// succeeds and then reading it hangs — so the answer is written once, here.
+async function handleFs(req, res, url) {
+  try {
+    return await fsRoute(req, res, url);
+  } catch (err) {
+    if (err.code !== 'ESTALLED') throw err;
+    return sendJson(res, 503, { error: stalledMessage(files.resolvePath(url.searchParams.get('path')) || '') });
+  }
+}
+
+async function fsRoute(req, res, url) {
+  const q = url.searchParams;
+  // The key rides in a header, except for /api/fs/file — that URL goes into
+  // <img>/<video> src, which cannot carry one.
+  const given = req.headers['x-fs-key'] || (url.pathname === '/api/fs/file' ? q.get('key') : '');
+  if (!files.keyMatches(given, FS_KEY)) {
+    return sendJson(res, 401, { error: 'file browser key required', needsKey: true });
+  }
+  if (req.method !== 'GET') return sendJson(res, 405, { error: 'read-only' });
+
+  const abs = files.resolvePath(q.get('path'));
+  if (!abs) return sendJson(res, 400, { error: 'outside the home directory' });
+  const why = files.blockedReason(abs);
+  if (why) {
+    return sendJson(res, 403, {
+      error: why === 'system' ? 'macOS keeps app tokens and keychains in ~/Library — it is not browsable'
+        : 'blocked: this path holds credentials',
+    });
+  }
+  // "Try again" after granting access — otherwise a folder that hung once stays
+  // refused for the life of the process.
+  if (q.get('retry') === '1') files.clearStall(abs);
+
+  let st;
+  try {
+    st = await files.statPath(abs);
+  } catch (err) {
+    if (err.code === 'ESTALLED') throw err;
+    return sendJson(res, 404, { error: 'no such file' });
+  }
+
+  if (url.pathname === '/api/fs/list') {
+    if (!st.isDirectory()) return sendJson(res, 400, { error: 'not a directory' });
+    const listing = await files.listDir(abs, { hidden: q.get('hidden') === '1' });
+    return sendJson(res, 200, {
+      path: abs,
+      display: files.display(abs),
+      // Home is the ceiling: there is nothing above it to offer.
+      parent: abs === files.HOME ? null : path.dirname(abs),
+      ...listing,
+    });
+  }
+
+  if (url.pathname === '/api/fs/read') {
+    // Not just "not a directory": opening a FIFO for reading blocks until
+    // someone writes to it, which would hang this request forever.
+    if (!st.isFile()) return sendJson(res, 400, { error: st.isDirectory() ? 'that is a directory' : 'not a regular file' });
+    const name = path.basename(abs);
+    const meta = { path: abs, display: files.display(abs), name, size: st.size, mtime: Math.round(st.mtimeMs) };
+    const kind = files.mediaKind(name);
+    // Media is handed over as a URL: the browser streams it far better than we
+    // could base64 it through JSON.
+    if (kind) return sendJson(res, 200, { kind, ...meta });
+    const page = await files.readPage(abs, st, Math.max(0, Number(q.get('offset')) || 0));
+    return sendJson(res, 200, { ...meta, ...page });
+  }
+
+  if (url.pathname === '/api/fs/file') {
+    if (!st.isFile()) return sendJson(res, 400, { error: st.isDirectory() ? 'that is a directory' : 'not a regular file' });
+    const name = path.basename(abs);
+    const download = q.get('download') === '1';
+    return serveFile(req, res, abs, st, {
+      'Content-Type': download ? 'application/octet-stream' : files.contentType(name),
+      // Belt and braces with the text/plain rule in lib/files.mjs: without this
+      // the browser is free to sniff an .html file back into being HTML.
+      'X-Content-Type-Options': 'nosniff',
+      ...(download ? { 'Content-Disposition': `attachment; filename="${name.replace(/[^\w.\- ]+/g, '_')}"` } : null),
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'private, no-cache', // the file on disk can change under us
+      ...CORS,
+    });
+  }
+
+  return sendJson(res, 404, { error: 'not found' });
+}
+
 // ----------------------------------------------------------------- API routes
 async function handleApi(req, res, url) {
   const q = url.searchParams;
+
+  if (url.pathname.startsWith('/api/fs/')) return handleFs(req, res, url);
 
   if (req.method === 'GET' && url.pathname === '/api/state') {
     return sendJson(res, 200, snapshot());
@@ -554,7 +692,7 @@ async function handleApi(req, res, url) {
       return sendJson(res, 404, { error: 'not found' });
     }
     if (!st.isFile()) return sendJson(res, 404, { error: 'not found' });
-    const head = {
+    return serveFile(req, res, file, st, {
       'Content-Type': UPLOAD_MIME[path.extname(name).toLowerCase()] || 'application/octet-stream',
       // The Files picker can put any type in here, so keep the browser from
       // sniffing its way past the type chosen above.
@@ -562,20 +700,7 @@ async function handleApi(req, res, url) {
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'private, max-age=3600', // names carry a timestamp, so they never change
       ...CORS,
-    };
-    const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
-    if (m && (m[1] || m[2])) {
-      const start = m[1] ? Number(m[1]) : Math.max(0, st.size - Number(m[2]));
-      const end = m[1] ? Math.min(m[2] ? Number(m[2]) : st.size - 1, st.size - 1) : st.size - 1;
-      if (start > end || start >= st.size) {
-        res.writeHead(416, { 'Content-Range': `bytes */${st.size}`, ...CORS });
-        return res.end();
-      }
-      res.writeHead(206, { ...head, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1 });
-      return fs.createReadStream(file, { start, end }).pipe(res);
-    }
-    res.writeHead(200, { ...head, 'Content-Length': st.size });
-    return fs.createReadStream(file).pipe(res);
+    });
   }
 
   // Deleting from the phone — one `name`, or a batch of `names` so clearing out
@@ -715,4 +840,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`cmux mirroring listening on http://${HOST}:${PORT} (${push.subscriptions.length} push subscription(s))`);
+  // Printed, not hidden: the phone needs it typed into Settings once, and the
+  // log is on the same Mac as the file it was written to.
+  console.log(`file browser key: ${FS_KEY}  (also in data/fs-key)`);
 });

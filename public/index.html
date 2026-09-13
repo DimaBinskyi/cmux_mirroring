@@ -32,7 +32,11 @@
       --safe-bottom: min(env(safe-area-inset-bottom), 12px);
       --sab: env(safe-area-inset-bottom); /* readable from JS for layout debug */
     }
-    html { background: var(--bg); }
+    /* iOS inflates the font of any block it decides is "wide text" — in the file
+       viewer that meant a minified or very long line rendering at half again the
+       size of the lines around it. Opting out is the only way to keep a
+       monospace grid looking like one. */
+    html { background: var(--bg); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { height: 100%; }
     body {
@@ -362,6 +366,46 @@
     .cfg-result { font-size: 13px; margin-top: 8px; }
     .cfg-result.ok { color: var(--accent); }
     .cfg-result.bad { color: var(--err); }
+
+    /* file browser */
+    .fb-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+    .fb-crumb { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 1px; font-size: 13px; }
+    .fb-crumb button { color: var(--accent); font-size: 13px; padding: 2px 3px; }
+    .fb-crumb .sep { color: var(--dim); }
+    .fb-act { flex: none; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 5px 11px; font-size: 13px; color: var(--muted); }
+    .fb-act.on { border-color: var(--accent); color: var(--accent); }
+    .fb-filter {
+      width: 100%; margin-bottom: 8px;
+      background: var(--card2); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); font: inherit; font-size: 14px; padding: 8px 10px;
+    }
+    .fb-row { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; background: var(--card); border-radius: 10px; padding: 9px 11px; margin-bottom: 5px; }
+    .fb-row.dim { opacity: 0.55; }
+    .fb-row.blocked { opacity: 0.45; }
+    .fb-ico { flex: none; width: 19px; text-align: center; font-size: 15px; }
+    .fb-name { flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fb-link { color: var(--dim); }
+    .fb-meta { flex: none; color: var(--dim); font-size: 11px; }
+
+    /* file viewer: text pages in, so the body scrolls from the top rather than
+       centring its contents the way the media viewer does */
+    #viewer .vw-body.doc { display: block; padding: 0 0 calc(var(--safe-bottom) + 8px); }
+    #viewer audio { width: 92%; }
+    /* The PDF stays inside the overlay, under our own ✕. Handing it to
+       window.open() instead navigates the installed app itself to the file, and
+       a standalone PWA has no chrome to come back with — you have to force-quit
+       it. White background because that is what a PDF page is. */
+    .vw-pdf { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+    .vw-text { counter-reset: ln; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 6px 8px; }
+    .vw-text .l { display: flex; gap: 10px; white-space: pre; }
+    .vw-text.wrap .l { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .vw-text .l::before {
+      counter-increment: ln; content: counter(ln);
+      flex: none; width: 3.2em; text-align: right; color: var(--dim);
+      user-select: none; -webkit-user-select: none;
+    }
+    .vw-text .cut { color: var(--warn); font-style: normal; }
+    .vw-hex { font: 11px/1.5 ui-monospace, monospace; white-space: pre; overflow-x: auto; padding: 8px; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -374,6 +418,7 @@
     <div id="tabs">
       <button data-tab="term">Term</button>
       <button data-tab="chat">Chat</button>
+      <button data-tab="files">Files</button>
     </div>
     <button id="switcher-btn" title="Switch workspace">⇄</button>
   </header>
@@ -410,6 +455,7 @@
 
   <nav id="bottomnav">
     <button data-route="#/" id="nav-sessions">Sessions</button>
+    <button data-route="#/files" id="nav-files">Files</button>
     <button data-route="#/feed" id="nav-feed">Feed</button>
     <button data-route="#/settings" id="nav-settings">Settings</button>
   </nav>

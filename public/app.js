@@ -1,11 +1,13 @@
 // cmux on the phone — vanilla ES module, no build step.
-// Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat), #/feed (push history).
+// Views: #/ (home = sidebar), #/ws/<id> (Term default | Chat | Files),
+// #/files/<path> (the Mac's files), #/feed (push history).
 
 import {
   lineText, buildRowsModel, parseInput, computeEdit, normalizeLines, caretInField,
 } from './term-input.mjs';
+import { createFileBrowser } from './files.mjs';
 
-const APP_VERSION = 'v56'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v60'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -25,6 +27,7 @@ const S = {
   battery: null, // the Mac's, mirrored over SSE — Safari has no battery API of its own
   route: { name: 'home', wsId: null },
   tab: 'term',
+  filesPath: null, // where the session's Files tab is standing
   surface: null,
   chat: null,
   search: '',
@@ -79,13 +82,25 @@ const gestureBusy = () => touchActive || Date.now() < gestureUntil;
 const userScrolling = () => touchActive || Date.now() - lastGestureTs < 2000;
 const userDragging = () => touchActive || Date.now() - lastMoveTs < 2000;
 
-// Custom server address (Settings): empty = the origin the app was loaded from.
-const BASE = (localStorage.getItem('cmux-server') || '').replace(/\/+$/, '');
+// Every call goes to the origin the app was loaded from. There used to be a
+// configurable server address here, from before `tailscale serve` fronted the
+// app: the same process serves the PWA and answers /api, so the only address it
+// could point at that is not this one is a plain-HTTP fallback the browser
+// blocks as mixed content anyway.
+
+// Reading the Mac's files is gated on its own key (data/fs-key on the Mac) —
+// the tailnet boundary alone is not what should stand between a browser tab and
+// every file in the home directory. Entered once in Settings.
+const fsKey = () => localStorage.getItem('cmux-fs-key') || '';
 
 function api(path, opts = {}) {
-  return fetch(BASE + path, {
+  const headers = {
+    ...(opts.body ? { 'Content-Type': 'application/json' } : null),
+    ...(path.startsWith('/api/fs/') ? { 'X-Fs-Key': fsKey() } : null),
+  };
+  return fetch(path, {
     ...opts,
-    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
   }).then(async (r) => {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || r.statusText);
@@ -112,13 +127,21 @@ function parseHash() {
   const h = location.hash || '#/';
   const m = h.match(/^#\/ws\/(.+)$/);
   if (m) return { name: 'ws', wsId: decodeURIComponent(m[1]) };
+  // The global browser keeps its directory in the hash: deep links work, and in
+  // Safari the back gesture walks back up the tree.
+  const f = h.match(/^#\/files(?:\/(.*))?$/);
+  if (f) return { name: 'files', wsId: null, path: f[1] ? decodeURIComponent(f[1]) : '~' };
   if (h === '#/feed') return { name: 'feed', wsId: null };
   if (h === '#/settings') return { name: 'settings', wsId: null };
   return { name: 'home', wsId: null };
 }
 
 window.addEventListener('hashchange', () => {
+  const was = S.route;
   S.route = parseHash();
+  // Leaving a session drops where its Files tab was standing; moving within the
+  // same session (there is nothing that does, today) would keep it.
+  if (was.name !== 'ws' || S.route.wsId !== was.wsId) S.filesPath = null;
   S.tab = 'term';
   S.chat = null;
   S.surface = null;
@@ -176,7 +199,7 @@ let chatRefetchTimer = null;
 
 function connectSSE() {
   if (S.es) S.es.close();
-  S.es = new EventSource(`${BASE}/api/stream`);
+  S.es = new EventSource('/api/stream');
   S.es.onopen = () => setLink(true);
   S.es.onmessage = (e) => {
     let msg;
@@ -296,6 +319,7 @@ function render() {
   document.body.className = S.route.name === 'ws' ? `ws ${S.tab}` : '';
   $('topbar').className = S.route.name === 'ws' ? 'ws' : '';
   $('nav-sessions').classList.toggle('active', S.route.name === 'home');
+  $('nav-files').classList.toggle('active', S.route.name === 'files');
   $('nav-feed').classList.toggle('active', S.route.name === 'feed');
   $('nav-settings').classList.toggle('active', S.route.name === 'settings');
 
@@ -303,6 +327,10 @@ function render() {
   if (S.route.name === 'home') {
     $('title').textContent = 'cmux mirroring';
     renderHome();
+  } else if (S.route.name === 'files') {
+    $('title').textContent = 'Files';
+    $('view').innerHTML = '<div id="fb"></div>';
+    globalFiles.mount($('fb'), S.route.path || '~');
   } else if (S.route.name === 'feed') {
     $('title').textContent = 'Feed';
     renderFeed();
@@ -475,7 +503,16 @@ function renderWs() {
     S.surface = w.agentSurfaceId || w.surfaces[0]?.id || null;
   }
   if (S.tab === 'chat') renderChat();
+  else if (S.tab === 'files') renderFilesTab();
   else renderTerm();
+}
+
+// The session's own files — no surface chips here, because a working directory
+// belongs to the workspace, not to whichever tab is in front.
+function renderFilesTab() {
+  const w = ws();
+  $('view').innerHTML = '<div id="fb"></div>';
+  wsFiles.mount($('fb'), S.filesPath || w.cwd || '~');
 }
 
 // --------------------------------------------------------------------- chat
@@ -1338,7 +1375,7 @@ const VIDEO_FILE = /\.(mov|mp4|m4v|webm)$/i;
 const AGENT_READS = /\.(jpe?g|png|gif|webp|bmp|pdf|txt|md|json|csv|log|xml|ya?ml|html?|[cm]?js|ts|py|sh|rs|go|java|rb|php|css|toml|ini|env|sql|diff|patch)$/i;
 // Uploads are saved as "<epoch-ms>-<original name>"; the stamp is noise to read.
 const fileLabel = (name) => String(name).replace(/^\d{10,}-/, '');
-const fileUrl = (name) => `${BASE}/api/upload-file?name=${encodeURIComponent(name)}`;
+const fileUrl = (name) => `/api/upload-file?name=${encodeURIComponent(name)}`;
 
 function fmtSize(bytes) {
   if (!bytes) return '0 B';
@@ -1533,7 +1570,7 @@ $('attach-file').onchange = () => {
 function putFile(file, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${BASE}/api/upload?name=${encodeURIComponent(file.name)}`);
+    xhr.open('POST', `/api/upload?name=${encodeURIComponent(file.name)}`);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       let data = {};
@@ -1582,6 +1619,40 @@ async function uploadFiles(files) {
   btn.disabled = false;
   if (failed.length) alert(`Upload failed —\n${failed.join('\n')}`);
 }
+
+// ------------------------------------------------------------ file browser
+// Two of them: the Files tab in a session opens at that workspace's cwd and
+// keeps its place in memory, while the global one starts at ~ and keeps its
+// place in the hash. Both are read-only and both need the key.
+// A path picked in the Files tab is something you want to type with, so it goes
+// to the terminal field and the app goes there with it. Inserting it without
+// switching put it in a field the Files tab covers — which looked exactly like
+// the ＋ button closing the file and doing nothing else.
+function insertPathFromFiles(p) {
+  if (S.route.name !== 'ws') return;
+  if (S.tab !== 'term') {
+    S.tab = 'term';
+    document.body.className = `ws ${S.tab}`;
+    clearTimeout(S.termTimer);
+    renderWs(); // builds #terminput, which insertPath needs to exist
+  }
+  insertPath(p);
+}
+
+const fileDeps = {
+  api,
+  esc,
+  fmtSize,
+  relTime,
+  fsKey,
+  onLongPress,
+  insertPath: insertPathFromFiles,
+  inSession: () => S.route.name === 'ws',
+  viewer: $('viewer'),
+};
+
+const wsFiles = createFileBrowser({ ...fileDeps, onPath: (p) => { S.filesPath = p; } });
+const globalFiles = createFileBrowser({ ...fileDeps, hashNav: true });
 
 // ---------------------------------------------------------------- composer
 function renderSuggestions() {
@@ -1688,17 +1759,14 @@ async function renderSettings() {
   try {
     [prefs, srv] = await Promise.all([api('/api/prefs'), api('/api/status')]);
   } catch {
-    /* server unreachable — still show the server card so it can be fixed */
+    /* unreachable — the cards still render, and the Server one says so */
   }
 
   $('view').innerHTML = `
     <div class="card">
       <div class="cfg-label">Server</div>
-      <div class="muted">Address of the Mac running cmux-push. Leave empty to use this app's own origin (${esc(location.origin)}).</div>
-      <input class="cfg-input" id="srv-addr" placeholder="e.g. http://100.81.107.15:4488" value="${esc(BASE)}"
-        autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button class="bigbtn" id="srv-save">Save &amp; test</button>
-      <div class="cfg-result" id="srv-result">${srv ? `connected ✓ · cmux ${srv.cmuxOnline ? 'online' : 'offline'} · ${srv.subscriptions} device(s) subscribed · up ${Math.round(srv.uptimeSec / 60)}m` : 'not connected'} · app ${APP_VERSION}</div>
+      <div class="muted">${esc(location.origin)}</div>
+      <div class="cfg-result ${srv ? 'ok' : 'bad'}">${srv ? `connected ✓ · cmux ${srv.cmuxOnline ? 'online' : 'offline'} · ${srv.subscriptions} device(s) subscribed · up ${Math.round(srv.uptimeSec / 60)}m` : 'not connected'} · app ${APP_VERSION}</div>
       <div class="muted" style="margin-top:4px">layout: window ${window.innerHeight} · visual ${Math.round(window.visualViewport?.height || 0)} · body ${document.body.style.height || 'auto'} · safe-b ${getComputedStyle(document.documentElement).getPropertyValue('--sab') || 'n/a'}</div>
     </div>
 
@@ -1731,9 +1799,33 @@ async function renderSettings() {
       <div class="cfg-label">Attachments</div>
       <div class="muted">Photos, videos and files this phone has uploaded to the Mac. Also reachable by holding 📎 in a session.</div>
       <button class="bigbtn secondary" id="open-gallery">📎 Browse uploads</button>
+    </div>
+
+    <div class="card">
+      <div class="cfg-label">File browser</div>
+      <div class="muted">Key for reading the Mac's files (Files tab). The Mac prints it at startup and keeps it in <code>data/fs-key</code>; without it this phone gets nothing. Reading is confined to the home directory, and keys, tokens and ~/Library are blocked outright.</div>
+      <input class="cfg-input" id="fs-key" placeholder="paste the key" value="${esc(fsKey())}"
+        autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button class="bigbtn" id="fs-save">Save &amp; test</button>
+      <div class="cfg-result" id="fs-result">${fsKey() ? '' : 'not set — the Files tab is locked'}</div>
     </div>`;
 
   $('open-gallery').onclick = openGallery;
+
+  $('fs-save').onclick = async () => {
+    const result = $('fs-result');
+    localStorage.setItem('cmux-fs-key', $('fs-key').value.trim());
+    result.className = 'cfg-result';
+    result.textContent = 'testing…';
+    try {
+      const home = await api('/api/fs/list?path=~');
+      result.className = 'cfg-result ok';
+      result.textContent = `unlocked ✓ · ${home.display} has ${home.total} visible items`;
+    } catch (err) {
+      result.className = 'cfg-result bad';
+      result.textContent = err.message;
+    }
+  };
 
   const bumpFont = (d) => {
     const v = Math.min(16, Math.max(7, termFont() + d));
@@ -1742,24 +1834,6 @@ async function renderSettings() {
   };
   $('font-dec').onclick = () => bumpFont(-0.5);
   $('font-inc').onclick = () => bumpFont(0.5);
-
-  $('srv-save').onclick = async () => {
-    let addr = $('srv-addr').value.trim().replace(/\/+$/, '');
-    if (addr && !/^https?:\/\//.test(addr)) addr = `http://${addr}`;
-    const result = $('srv-result');
-    result.className = 'cfg-result';
-    result.textContent = 'testing…';
-    try {
-      const r = await fetch(`${addr || location.origin}/api/status`).then((x) => x.json());
-      localStorage.setItem('cmux-server', addr);
-      result.className = 'cfg-result ok';
-      result.textContent = `connected ✓ · cmux ${r.cmuxOnline ? 'online' : 'offline'} — reloading…`;
-      setTimeout(() => location.reload(), 700);
-    } catch (err) {
-      result.className = 'cfg-result bad';
-      result.textContent = `cannot reach ${addr || 'origin'}: ${err.message}. Not saved.`;
-    }
-  };
 
   const enable = $('enable');
   if (enable) enable.onclick = () => enablePush().then(renderSettings);

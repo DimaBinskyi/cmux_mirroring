@@ -8,7 +8,10 @@ works in any browser.
 
 - **Home = the cmux sidebar**: every workspace with live status (🚨 needs input /
   ⚙️ working / ✅ done / 💤 idle), current activity, groups with worst-status
-  roll-up, ✕ to close a workspace in place, ＋ to create one.
+  roll-up, ✕ to close a workspace in place, ＋ to create one in a folder you name.
+  Hold a row to rename that workspace. Inside a session, ⇄ in the title bar opens
+  the same list as a sheet — the one needing input stands out, the current one is
+  outlined — so moving between sessions never means going back to Home first.
 - **Link state and the Mac's battery, in the title bar**: one dot — green
   *Connected*, amber *cmux offline* (the Mac answers, cmux is not running), red
   *Disconnected* — next to the Mac's own battery, percent and whether it is
@@ -24,7 +27,8 @@ works in any browser.
   navigation; "▲ All" loads up to 10k lines of plain-text history.
 - **Tabs, not splits**: every cmux tab *and* split shows as a chip. Chips update
   live when tabs are created/closed on the Mac, each has its own ✕ (with
-  confirmation), and ＋ opens a new tab and switches to it.
+  confirmation), ＋ opens a new tab and switches to it, and holding a chip
+  renames that tab.
 - **Two-way bound input**: a multi-line textarea mirrors the terminal's input line
   in both directions. Typing echoes locally and streams to the pty (batched,
   cursor-aware — mid-line edits, word-delete, selection replace, paste all land
@@ -32,11 +36,15 @@ works in any browser.
   a newline in both, sent the way that terminal wants one (`shift+enter` in the
   Claude composer, backslash+CR at a shell prompt); only the ⏎ button submits.
   While a menu or dialog owns the keyboard — `/model`, a permission prompt — the
-  field holds your draft instead of filling with what's on screen.
+  field holds your draft instead of filling with what's on screen. When Claude's
+  own slash-command menu opens on screen, its commands appear as tappable chips
+  above the field, so you pick one instead of typing it on a phone keyboard.
 - **Key bar**: esc ⇥ ⇧⇥ arrows ^C ⏎, plus ⌄⌨ to hide the keyboard.
 - **Chat view**: the Claude Code conversation rendered as chat — markdown,
   collapsed tool calls, permission prompts as Allow/Deny cards, composer with
-  slash-command suggestions.
+  slash-command suggestions. It follows the selected chip, so a workspace running
+  several agents shows the one you are looking at; "▲ Load older messages" pulls
+  the rest of the transcript in.
 - **Attachments**: 📎 picks anything on the phone — camera, library or Files —
   uploads it to the Mac (`data/uploads/`) with a progress bar, and inserts the
   file path into the prompt for the agent. HEIC is transcoded on arrival, since
@@ -47,10 +55,39 @@ works in any browser.
   Chat view is a tappable chip that opens the file.
   Uploads are swept after 30 days, so the camera roll doesn't accumulate in
   `data/`.
+- **File browser (read-only)**: the Mac's files on the phone. A *Files* tab inside
+  a session opens at that workspace's working directory; the *Files* item in the
+  bottom nav starts at `~` and keeps its place in the URL. One directory per tap
+  (nothing walks a tree), tappable breadcrumbs, a filter box, a toggle for
+  dotfiles. Text and code open in a monospace viewer with line numbers, paged
+  256KB at a time so a `package-lock.json` cannot lock up the phone, with a wrap
+  toggle for long lines; images, video, audio and PDFs open as themselves, inside
+  the viewer — never by navigating the app away from itself, which in a
+  standalone PWA is a one-way trip. Anything else shows its first kilobyte as
+  hex, and ⤓ hands the file to iOS when the phone cannot render it. **＋ path**
+  puts a file's path in the terminal input and takes you to the Term tab, which
+  is the point of browsing from here: you are usually looking for something to
+  hand to the agent. Holding a row does the same without opening the file.
+  It is gated on its own key — `data/fs-key`, printed at startup, entered once in
+  Settings — because the tailnet boundary alone should not be what stands between
+  a browser tab and every file in your home directory. Reads are confined to
+  `$HOME` after resolving symlinks, and `~/Library`, `.ssh`, `.env*`, `*.pem` and
+  the rest of the deny-list in `lib/files.mjs` are refused inside it: those rows
+  appear with a 🔒 rather than vanishing, so nothing looks mysteriously missing.
+  macOS has its own opinion about `~/Desktop`, `~/Downloads` and `~/Documents` —
+  see the privacy note at the end of step 4.
 - **Web Push notifications**: urgency-mapped (🚨 needs input / ⚠️ error /
   ✅ finished / 🤖 background) with per-category toggles in Settings; pushes
-  deep-link into the pinging session and arrive even off the tailnet.
-- **Settings**: server address (host:port) and notification preferences.
+  deep-link into the pinging session and arrive even off the tailnet. A session
+  you are actually looking at on the phone does not ping you about itself — the
+  app reports what it is watching, and the server holds those back.
+- **Feed**: every notification the server has sent, newest first, whether or not
+  it reached the phone — muted categories land here too, which is what makes
+  muting safe. Tapping one opens the session it came from, and while
+  notifications are off it says so and points at Settings.
+- **Settings**: which server it is talking to and whether cmux is up, push
+  on/off plus the four category mutes, terminal font size, the file browser key,
+  and a way into the uploads gallery.
 
 ## Architecture
 
@@ -59,7 +96,8 @@ iPhone PWA (installed from Safari)
  ├─ HTTPS + SSE ── Tailscale ──▶ Node server (Mac, 127.0.0.1:4488, launchd)
  │                                ├─ cmux control socket (persistent, ~2ms/call;
  │                                │   newline-JSON protocol, CLI fallback)
- │                                └─ ~/.claude/projects/*.jsonl (chat transcripts)
+ │                                ├─ ~/.claude/projects/*.jsonl (chat transcripts)
+ │                                └─ $HOME, read-only and key-gated (file browser)
  └─ Web Push ◀── Apple ◀───────── same server
 ```
 
@@ -124,12 +162,19 @@ descendant. It breaks the moment you install it under launchd in step 4.
 ```sh
 git clone https://github.com/DimaBinskyi/cmux_mirroring && cd cmux_mirroring
 npm install
-node server.mjs     # cmux mirroring listening on http://127.0.0.1:4488
+node server.mjs
+# cmux mirroring listening on http://127.0.0.1:4488 (0 push subscription(s))
+# file browser key: <24 characters>  (also in data/fs-key)
 ```
+
+That second line is generated on this first run and kept in `data/fs-key`; step 8
+asks the phone for it. This run is also what creates `data/`, which the launchd
+agent in step 4 writes its logs into.
 
 Clone it straight into your home folder. Under `~/Documents`, `~/Desktop` or
 `~/Downloads` the launchd agent from step 4 meets macOS's per-folder privacy
-protection and may need an extra permission grant to read its own repo.
+protection and may need an extra permission grant to read its own repo — see the
+privacy note at the end of step 4.
 
 Check, from another terminal:
 
@@ -164,6 +209,24 @@ in as a cmux descendant, the launchd one is not.
 If cmux is *not* at `/Applications/cmux.app`, also set `CMUX_BIN` in the plist:
 launchd hands the agent a bare `/usr/bin:/bin:/usr/sbin:/sbin` PATH, so a `cmux`
 CLI installed anywhere else will not be found.
+
+**macOS privacy, and why a folder can hang instead of failing.** `~/Desktop`,
+`~/Downloads` and `~/Documents` are TCC-protected. A launchd agent asking for one
+does not get "permission denied" — the call *blocks* while a consent dialog waits
+for an answer nobody is at the Mac to give, and the thread it is holding never
+comes back. The file browser fails those folders after four seconds with an
+explanation and refuses them instantly afterwards, so one bad folder cannot take
+the server down with it, but you still cannot read them until you grant access:
+
+> System Settings → Privacy & Security → **Full Disk Access** → ＋ → your node
+> binary (`which node`), then
+> `launchctl kickstart -k gui/$(id -u)/com.cmux-mirroring` and tap **Try again**
+> in the app.
+
+If you use nvm, that path contains the version number and changes when you
+upgrade Node — you have to add the new one. The same protection is why cloning
+the repo under `~/Documents` is worth avoiding: it applies to the agent reading
+its *own* files too.
 
 ### 5. Stop the Mac from sleeping
 
@@ -252,6 +315,9 @@ curl -m 5 -H 'Content-Type: application/json' \
 2. Open it from the icon — iOS only grants Web Push to installed home-screen apps,
    never to a tab.
 3. Settings tab → **Enable notifications** → Allow → **Send test push**.
+4. Settings tab → **File browser** → paste the key the Mac printed at startup
+   (`cat data/fs-key`) → **Save & test**. Until it is there the Files tab is
+   locked; everything else works without it.
 
 Check: trigger something in cmux that notifies (let an agent finish a task) and
 the push should arrive on its own. If the test push works but real ones never
@@ -268,6 +334,7 @@ Optional environment overrides, set in the launchd plist or the shell:
 | `CMUX_SOCKET_PATH` | `~/.local/state/cmux/cmux.sock` | control socket |
 | `CMUX_SOCKET_PASSWORD` | read from password file | socket auth |
 | `CMUX_MIRRORING_URL` | `http://127.0.0.1:4488` | where `hooks/cmux-notify.py` posts |
+| `UV_THREADPOOL_SIZE` | `16` (set by the server) | libuv threads; headroom for TCC-blocked calls |
 
 ## Updating
 
@@ -297,6 +364,7 @@ server must be running.
 ```sh
 node scripts/test-input-sync.mjs <surface-id>   # Claude composer; use an IDLE one
 node scripts/test-shell-sync.mjs <workspace-id> # shell prompt, in a scratch tab
+node scripts/test-files.mjs [workspace-id]      # file browser; an id also tests "＋ path"
 node scripts/test-scroll.mjs <workspace-id>     # touch scrolling, headless Chromium
 node scripts/smoke-browser.mjs <workspace-id> --type  # app loads, typing reaches the pty
 node scripts/dump-grid.mjs <surface-id>         # what the parser sees, row by row
@@ -315,11 +383,21 @@ npx playwright install chromium-headless-shell
 ## Notes
 
 - The server binds to 127.0.0.1 only; Tailscale Serve terminates HTTPS and proxies
-  to it, so exposure is tailnet-only. There is no auth of its own — anyone on your
-  tailnet can control your terminals, so keep the tailnet personal.
+  to it, so exposure is tailnet-only. Apart from the file browser's key, there is
+  no auth of its own — anyone on your tailnet can control your terminals, so keep
+  the tailnet personal. CORS is still open (`Access-Control-Allow-Origin: *`),
+  which is worth tightening to same-origin now that the app only ever calls the
+  host it was loaded from.
+- The app always talks to the origin it was served from. The configurable server
+  address that used to live in Settings is gone: the same process serves the PWA
+  and answers `/api`, and the only other address it could name — plain HTTP on
+  the tailnet IP — is blocked as mixed content once the app itself is HTTPS.
 - VAPID keys are generated on first start into `data/` (gitignored), along with
-  push subscriptions, notification history, preferences, and uploads. Deleting
-  `data/` re-keys push, and every phone has to subscribe again.
+  the file browser key, push subscriptions, notification history, preferences,
+  and uploads. Deleting `data/` re-keys push (every phone has to subscribe again)
+  and re-keys the file browser (every phone has to be given the new key). To
+  rotate just the file browser key — if it ends up somewhere it shouldn't —
+  `rm data/fs-key`, restart the server, and read the new one off the log.
 - The PWA icons are committed; `npm run icons` regenerates them (no image
   library — raw PNG encoding) if you change the glyph.
 - Colored scrollback is limited to what cmux's render grid retains (~240 rows);

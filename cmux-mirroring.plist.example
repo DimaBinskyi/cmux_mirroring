@@ -14,14 +14,17 @@
   </array>
   <key>WorkingDirectory</key>
   <string>/path/to/cmux_mirroring</string>
-  <!-- Uncomment to override defaults (see the README's env table). Needed when
-       cmux is not at /Applications/cmux.app: launchd hands the agent a bare
+  <!-- UV_THREADPOOL_SIZE: a folder macOS has not granted this agent (Desktop,
+       Downloads, Documents) blocks its libuv thread until someone answers a
+       consent dialog, and the default pool is 4. Add CMUX_BIN here too when cmux
+       is not at /Applications/cmux.app: launchd hands the agent a bare
        /usr/bin:/bin:/usr/sbin:/sbin PATH, so a cmux CLI elsewhere is not found.
+       See the README's env table for the rest. -->
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CMUX_BIN</key><string>/opt/homebrew/bin/cmux</string>
+    <key>UV_THREADPOOL_SIZE</key><string>16</string>
+    <!-- <key>CMUX_BIN</key><string>/opt/homebrew/bin/cmux</string> -->
   </dict>
-  -->
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
