@@ -54,7 +54,7 @@ a row count as its second argument (default 14).
 | `lib/files.mjs` | file browser: home confinement, deny-list, text paging, its key |
 | `public/app.js` | the whole client: routing, rendering, polling |
 | `public/files.mjs` | the file browser view — listing, breadcrumbs, text/media viewer |
-| `public/term-input.mjs` | pure functions — grid → input line, field edit → pty ops |
+| `public/term-input.mjs` | pure functions — grid → input line, grid → slash menu, field edit → pty ops |
 | `hooks/cmux-notify.py` | cmux notification hook → `/api/notify`; registered in `~/.config/cmux/cmux.json` |
 
 ## Gotchas

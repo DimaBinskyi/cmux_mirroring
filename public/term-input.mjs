@@ -248,6 +248,71 @@ export function computeEdit(prevValue, newValue, caret, { lineBreak = 'escape' }
   return { ops, ...moved };
 }
 
+// A left-truncated entry only shows its tail. The list is filtered by what is
+// typed, so the command both starts with `typed` and ends with that tail; offer
+// the shortest string satisfying both, which is the join at the longest overlap.
+function rejoinTruncated(typed, tail) {
+  for (let k = Math.min(typed.length, tail.length); k > 0; k -= 1) {
+    if (typed.slice(-k) === tail.slice(0, k)) return typed + tail.slice(k);
+  }
+  return typed + tail;
+}
+
+// The commands Claude Code is offering under the composer, for the chips above
+// the field. Read off the screen like everything else here, so the shape of the
+// menu is the contract:
+//
+//   ❯ /claude-md-
+//   ──────────────────────────────────────────
+//     /claude-md-management:revise-claude-md      (claude-md-management) Update CLAUDE.md…
+//     …-md-management:claude-md-improver (…)      (claude-md-management) Audit and improve…
+//                                                 files. Scans for all CLAUDE.md files…
+//     /claude-api                                 Reference for the Claude API…
+//
+// Entries share one column; a description wraps into rows that leave that column
+// blank; an entry too wide for it is ellipsized from the LEFT, losing its "/".
+// Treating any non-matching row as the end of the list — which is what this used
+// to do — stopped at the first wrapped description, or at a truncated entry, and
+// left a single chip standing for a menu of six.
+export function slashMenuItems(grid, rowsModel, typed) {
+  const items = [];
+  if (!grid || !grid.cursor || !rowsModel) return items;
+  if (!typed.startsWith('/') || typed.includes('\n')) return items;
+  const seen = new Set();
+  let col = -1; // column the entries start at, taken from the first one
+  for (let i = grid.cursor.row + 1; i < grid.rows; i += 1) {
+    const t = lineText(rowsModel[grid.scrollbackRows + i] || []);
+    const at = t.search(/\S/);
+    if (at < 0) {
+      if (items.length) break; // the list itself has no blank rows
+      continue;
+    }
+    const entry = t.slice(at).split(/\s{2,}/)[0]; // drop the description column
+    const m = entry.match(/^[❯>]?\s*(\/[\w][\w:-]*)(\s|$)/);
+    if (m) {
+      if (col < 0) col = at + entry.indexOf('/');
+      if (!seen.has(m[1])) {
+        seen.add(m[1]);
+        items.push(m[1]);
+      }
+      if (items.length >= 20) break;
+    } else if (col < 0) {
+      continue; // still above the list (the composer's own rule, say)
+    } else if (at > col) {
+      continue; // a wrapped description: the entry column is blank here
+    } else if (t[at] === '…') {
+      const full = rejoinTruncated(typed, entry.slice(1).replace(/\s+\([^()]*\)$/, ''));
+      if (full && !seen.has(full)) {
+        seen.add(full);
+        items.push(full);
+      }
+    } else {
+      break; // real content back at the entry column: the list ended
+    }
+  }
+  return items;
+}
+
 // The grid cannot tell a typed trailing space from an erased cell, so compare
 // field and terminal ignoring trailing whitespace on every line: if they agree
 // that far, the field is authoritative and must not be rewritten.

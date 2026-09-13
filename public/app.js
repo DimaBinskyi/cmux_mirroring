@@ -3,11 +3,12 @@
 // #/files/<path> (the Mac's files), #/feed (push history).
 
 import {
-  lineText, buildRowsModel, parseInput, computeEdit, normalizeLines, caretInField,
+  buildRowsModel, parseInput, computeEdit, normalizeLines, caretInField,
+  slashMenuItems,
 } from './term-input.mjs';
 import { createFileBrowser } from './files.mjs';
 
-const APP_VERSION = 'v60'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v61'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -991,27 +992,14 @@ function paintGrid() {
 }
 
 // Mirror Claude Code's slash-command dropdown: when the composer shows its
-// suggestion menu (rows under the cursor like "/clear  Clear…"), surface the
-// commands as tappable chips above the input.
+// suggestion menu, surface every command it is offering as a tappable chip
+// above the input. The strip scrolls horizontally, so the whole menu fits.
+// Reading the menu off the grid lives in term-input.mjs with the rest of it.
 function updateTermSuggest() {
   const el = $('term-suggest');
   const ti = $('terminput');
   if (!el || !ti || !grid || !rowsModel) return;
-  const val = ti.value;
-  const items = [];
-  if (val.startsWith('/') && !val.includes('\n')) {
-    const seen = new Set();
-    const r = grid.cursor.row;
-    for (let i = r + 1; i <= Math.min(grid.rows - 1, r + 12); i += 1) {
-      const t = lineText(rowsModel[grid.scrollbackRows + i] || []);
-      const m = t.match(/^\s*[❯>]?\s*(\/[\w][\w:-]*)(\s|$)/);
-      if (m && !seen.has(m[1])) {
-        seen.add(m[1]);
-        items.push(m[1]);
-        if (items.length >= 8) break;
-      } else if (items.length && !m && t.trim()) break; // menu block ended
-    }
-  }
+  const items = slashMenuItems(grid, rowsModel, ti.value);
   el.hidden = !items.length;
   el.innerHTML = items.map((c) => `<button data-cmd="${esc(c)}">${esc(c)}</button>`).join('');
   for (const b of el.querySelectorAll('[data-cmd]')) {
