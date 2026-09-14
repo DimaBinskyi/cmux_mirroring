@@ -20,7 +20,7 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
-import { rpc, rpcTry, readScreen, sendText, sendKey, cli } from './lib/cmux.mjs';
+import { rpc, rpcTry, readScreen, sendText, sendKey, cli, launchApp } from './lib/cmux.mjs';
 import { CmuxState } from './lib/state.mjs';
 import { resolveTranscript, newestTranscriptForCwd, parseTranscript } from './lib/transcripts.mjs';
 import { PushService } from './lib/push.mjs';
@@ -105,6 +105,49 @@ setInterval(() => {
 }, 25_000).unref();
 refreshBattery();
 setInterval(refreshBattery, 60_000).unref();
+
+// ------------------------------------------------------------ cmux lifecycle
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// `open` returns as soon as the app is launched, which is well before the
+// control socket exists, so the wait is the point of this.
+async function startCmux(timeoutMs = 40_000) {
+  if (state.online) return true;
+  await launchApp();
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    await sleep(1000);
+    await state.refresh().catch(() => {}); // still starting
+    if (state.online) return true;
+  }
+  return false;
+}
+
+// Closing a window's last workspace closes the window with it, so closing
+// everything from the phone leaves cmux with nowhere to put the next one — and
+// `new-workspace` cannot recover on its own: it creates in "the caller's
+// window", and this server is a launchd agent, not a cmux descendant, so it has
+// no caller to fall back on. That is why ＋ New workspace did nothing once the
+// list was empty.
+async function createWorkspace(rawCwd) {
+  // Always absolute: a relative path would be read as a cmux subcommand by the
+  // bare-path form below. Deliberately not checked for existence — stat on a
+  // TCC-protected folder hangs rather than failing, and cmux reports a bad
+  // directory perfectly well by itself.
+  const home = os.homedir();
+  const dir = path.resolve(home, String(rawCwd || '').trim().replace(/^~(?=\/|$)/, home) || home);
+
+  if (!state.online && !(await startCmux())) throw new Error('cmux would not start');
+
+  const tree = await rpc('system.tree').catch(() => ({}));
+  const win = (tree.windows || [])[0];
+  // Name the window rather than leaning on cmux's fallback to a current one.
+  if (win) return cli(['new-workspace', '--window', win.id, '--focus', 'false', '--cwd', dir]);
+  // No window at all: the bare path form is the one command that creates the
+  // window and the workspace together — and starts cmux on the way, which is
+  // the belt to startCmux's braces.
+  return cli([dir], { timeout: 60_000 });
+}
 
 // ------------------------------------------------------------------- helpers
 function readBody(req) {
@@ -600,18 +643,32 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // Start cmux from the phone. Its own route as well as a step inside
+  // newWorkspace, because "open my sessions again" and "open a new one" are
+  // different intents and only the second one should create anything.
+  if (req.method === 'POST' && url.pathname === '/api/cmux-launch') {
+    const ok = await startCmux();
+    return ok
+      ? sendJson(res, 200, { ok: true, online: true })
+      : sendJson(res, 504, { error: 'cmux did not come up — check the Mac' });
+  }
+
   // Topology management from the phone: tabs (surfaces), splits, workspaces.
   if (req.method === 'POST' && url.pathname === '/api/ws-action') {
     const { action, workspace_id, surface_id, cwd, title } = JSON.parse(await readBody(req));
     const name = String(title || '').trim().slice(0, 80);
-    const home = os.homedir();
+
+    if (action === 'newWorkspace') {
+      const out = await createWorkspace(cwd);
+      await state.refresh().catch(() => {});
+      return sendJson(res, 200, { ok: true, out: String(out).trim().slice(0, 200) });
+    }
+
     const actions = {
       newTab: () => workspace_id && ['new-surface', '--workspace', workspace_id, '--focus', 'false'],
       closeTab: () => surface_id && ['close-surface', '--surface', surface_id,
         ...(workspace_id ? ['--workspace', workspace_id] : [])],
       closeWorkspace: () => workspace_id && ['close-workspace', '--workspace', workspace_id],
-      newWorkspace: () => ['new-workspace', '--focus', 'false',
-        ...(cwd ? ['--cwd', String(cwd).replace(/^~(?=\/|$)/, home)] : [])],
       renameWorkspace: () => workspace_id && name && ['rename-workspace', '--workspace', workspace_id, name],
       renameTab: () => surface_id && name && ['rename-tab', '--surface', surface_id,
         ...(workspace_id ? ['--workspace', workspace_id] : []), name],
@@ -742,6 +799,7 @@ async function handleApi(req, res, url) {
       subscriptions: push.subscriptions.length,
       feed: push.feed.length,
       cmuxOnline: state.online,
+      cmuxLastOkAt: state.lastOkAt,
       uptimeSec: Math.round(process.uptime()),
     });
   }

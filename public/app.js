@@ -8,7 +8,7 @@ import {
 } from './term-input.mjs';
 import { createFileBrowser } from './files.mjs';
 
-const APP_VERSION = 'v61'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v63'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -94,19 +94,31 @@ const userDragging = () => touchActive || Date.now() - lastMoveTs < 2000;
 // every file in the home directory. Entered once in Settings.
 const fsKey = () => localStorage.getItem('cmux-fs-key') || '';
 
-function api(path, opts = {}) {
+function api(path, { timeoutMs, ...opts } = {}) {
   const headers = {
     ...(opts.body ? { 'Content-Type': 'application/json' } : null),
     ...(path.startsWith('/api/fs/') ? { 'X-Fs-Key': fsKey() } : null),
   };
+  // Opt-in, not a default: a Mac that is asleep swallows the connection rather
+  // than refusing it, so a call with no deadline never settles and whatever was
+  // waiting on it — the status of the link, above all — never updates. Only the
+  // calls that decide what the screen says set one; a slow file read is allowed
+  // to be slow.
+  const ctl = timeoutMs ? new AbortController() : null;
+  const bell = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null;
   return fetch(path, {
     ...opts,
+    signal: ctl?.signal,
     headers: Object.keys(headers).length ? headers : undefined,
-  }).then(async (r) => {
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || r.statusText);
-    return data;
-  });
+  })
+    .finally(() => clearTimeout(bell))
+    // "signal is aborted without reason" is not something to put on a phone.
+    .catch((err) => { throw ctl?.signal.aborted ? new Error('the Mac did not answer') : err; })
+    .then(async (r) => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      return data;
+    });
 }
 
 function relTime(ts) {
@@ -162,11 +174,18 @@ window.addEventListener('hashchange', () => {
 // itself is down. They need different things from the user, so they say
 // different things here.
 let linkUp = false; // the Mac answered us the last time we asked
+let linkTried = false; // ...and we have actually asked once, so "down" means down
+let lastOkAt = null; // when this phone last got an answer
 
 function connStatus() {
-  if (!linkUp) return { cls: 'bad', label: 'Disconnected' };
-  if (!S.snap?.online) return { cls: 'warn', label: 'cmux offline' };
-  return { cls: 'ok', label: 'Connected' };
+  if (!linkTried) return { cls: '', label: '', state: 'connecting' };
+  if (!linkUp) return { cls: 'bad', label: 'Disconnected', state: 'no-link' };
+  // The link is up but no snapshot has landed yet — the gap between an SSE
+  // opening and its first state frame. Calling that "cmux offline" flashed a
+  // wrong answer on screen for the frame it lasts.
+  if (!S.snap) return { cls: '', label: '', state: 'connecting' };
+  if (!S.snap.online) return { cls: 'warn', label: 'cmux offline', state: 'no-cmux' };
+  return { cls: 'ok', label: 'Connected', state: 'ok' };
 }
 
 // Room in the bar is the constraint, so the icon carries the charging state and
@@ -181,8 +200,10 @@ function batteryHtml() {
   return !b.ac && b.percent <= 20 ? `<span class="low">${text}</span>` : text;
 }
 
-function setLink(up) {
-  linkUp = !!up;
+// The bar only. Every view redraws it, and redrawing is not an attempt to
+// reach the Mac — keeping that out of setLink is what stops a plain repaint at
+// boot from declaring the link dead before anything has been asked.
+function paintLink() {
   const { cls, label } = connStatus();
   const dot = $('dot');
   if (dot) dot.className = `dot ${cls}`;
@@ -193,6 +214,137 @@ function setLink(up) {
     batt.innerHTML = batteryHtml();
     batt.classList.toggle('stale', !linkUp);
   }
+}
+
+// The result of an actual attempt.
+function setLink(up) {
+  const was = connStatus().state;
+  linkUp = !!up;
+  linkTried = true;
+  if (up) lastOkAt = Date.now();
+  paintLink();
+  // A status screen is showing exactly when the state is not ok, so a change of
+  // state has to repaint — or the panel outlives the outage, and the session
+  // list outlives the link, until something else happens to render.
+  if (connStatus().state !== was) queueStatusRepaint();
+}
+
+// Deferred and guarded: setLink() can be reached from inside a render, and
+// repainting synchronously from there would recurse. Only the two views that
+// can be standing on a status screen are touched — a live terminal keeps its
+// last frame when the link drops, and says so with the dot.
+let statusRepaintQueued = false;
+
+function queueStatusRepaint() {
+  if (statusRepaintQueued) return;
+  statusRepaintQueued = true;
+  setTimeout(() => {
+    statusRepaintQueued = false;
+    if (S.route.name === 'home') renderHome();
+    else if (S.route.name === 'ws' && !ws()) renderWs();
+  }, 0);
+}
+
+// The app is nothing without the Mac, so when it has no Mac it says which half
+// is missing: "nothing is answering" and "cmux is shut" need different things
+// from the person holding the phone, and neither is an empty pane.
+function statusHtml() {
+  const { state } = connStatus();
+  if (state === 'connecting') {
+    return `<div class="status"><div class="ico"><span class="spin"></span></div>
+      <div class="t">Connecting…</div>
+      <div class="d">Reaching ${esc(location.host)}.</div></div>`;
+  }
+  if (state === 'no-cmux') {
+    return `<div class="status"><div class="ico">🌙</div>
+      <div class="t">cmux isn't running</div>
+      <div class="d">The Mac is answering, but cmux itself is closed — there are no sessions to show.</div>
+      <button class="bigbtn" id="status-launch">Start cmux on the Mac</button>
+      <button class="bigbtn secondary" id="status-new-ws">＋ Start it with a new workspace</button>
+      <div class="when">If cmux <em>is</em> open on the Mac, socket control is off:
+        <code>automation.socketControlMode</code> has to be <code>"password"</code>.</div>
+      ${seenHtml(S.snap?.lastOkAt, 'cmux last answered')}
+      <button class="bigbtn secondary" id="status-retry">Try again</button></div>`;
+  }
+  return `<div class="status"><div class="ico">📡</div>
+    <div class="t">Can't reach the Mac</div>
+    <div class="d">Nothing is answering at ${esc(location.host)}.</div>
+    <ul>
+      <li>Is the Mac awake and on the tailnet?</li>
+      <li>Is Tailscale switched on, on this phone?</li>
+      <li>Is the cmux-mirroring agent running over there?</li>
+    </ul>
+    ${seenHtml(lastOkAt, 'Last reached')}
+    <button class="bigbtn secondary" id="status-retry">Try again</button></div>`;
+}
+
+function seenHtml(ts, label) {
+  if (!ts) return '<div class="when">Retrying…</div>';
+  const rel = relTime(ts); // 'now' | '5m' | '3h' | a date once it is yesterday's news
+  const when = rel === 'now' ? 'just now' : /^\d+[mh]$/.test(rel) ? `${rel} ago` : `on ${rel}`;
+  return `<div class="when">${label} ${when} · retrying…</div>`;
+}
+
+// Starting cmux and creating the first workspace both take seconds, not
+// milliseconds — launching an app and waiting for its control socket. A button
+// that just sits there reads as a button that did nothing, so it narrates.
+let statusBusy = false;
+
+async function withProgress(btn, label, fn) {
+  const was = btn.textContent;
+  btn.textContent = label;
+  btn.disabled = true;
+  statusBusy = true;
+  try {
+    await fn();
+  } finally {
+    statusBusy = false;
+    btn.textContent = was;
+    btn.disabled = false;
+    render();
+  }
+}
+
+function newWorkspacePrompt(btn) {
+  const cwd = window.prompt('Folder for the new workspace:', '~/Documents/dev');
+  if (cwd === null) return;
+  const go = () => wsAction({ action: 'newWorkspace', cwd: cwd.trim() || undefined });
+  // From the status screen this also has to start cmux, hence the wait.
+  if (btn) withProgress(btn, 'Starting…', go);
+  else go();
+}
+
+// Paint a status screen into #view and wire its buttons. Returns false when the
+// link is fine and the caller should render its own view instead.
+function paintStatus() {
+  if (connStatus().state === 'ok') return false;
+  // The retry poll ticks all the way through a cmux launch, and every tick lands
+  // here. Repainting would throw away the very button doing the work, along with
+  // the label telling you it is still going.
+  if (statusBusy && $('view').querySelector('.status')) return true;
+  $('view').innerHTML = statusHtml();
+  const retry = $('status-retry');
+  if (retry) {
+    retry.onclick = () => {
+      retry.textContent = 'Trying…';
+      refreshSnapshot();
+      connectSSE(); // a hung EventSource never errors, so it never retries itself
+    };
+  }
+  const launch = $('status-launch');
+  if (launch) {
+    launch.onclick = () => withProgress(launch, 'Starting cmux…', async () => {
+      try {
+        await api('/api/cmux-launch', { method: 'POST' });
+      } catch (err) {
+        alert(`Could not start cmux: ${err.message}`);
+      }
+      await refreshSnapshot();
+    });
+  }
+  const newWs = $('status-new-ws');
+  if (newWs) newWs.onclick = () => newWorkspacePrompt(newWs);
+  return true;
 }
 
 // --------------------------------------------------------------------- SSE
@@ -237,18 +389,44 @@ function connectSSE() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     if (!S.es || S.es.readyState === EventSource.CLOSED) connectSSE();
+    retryDelay = 4000; // coming back to the app is worth a prompt attempt
     refreshSnapshot();
   }
 });
 
+// While the link is down nothing else will bring it back on its own: an
+// EventSource whose connection hangs (the Mac asleep, rather than refused)
+// stays in CONNECTING and never fires onerror, so it never reconnects either.
+// This is what makes the status screen recover by itself instead of sitting
+// there until someone force-quits the app.
+let retryTimer = null;
+let retryDelay = 4000;
+
+function scheduleRetry() {
+  clearTimeout(retryTimer);
+  // A backgrounded phone is not worth waking a sleeping Mac for; visibilitychange
+  // picks it up again.
+  if (document.visibilityState !== 'visible') return;
+  retryTimer = setTimeout(refreshSnapshot, retryDelay);
+  retryDelay = Math.min(retryDelay * 1.6, 30_000);
+}
+
 async function refreshSnapshot() {
+  clearTimeout(retryTimer);
   try {
-    S.snap = await api('/api/state');
+    S.snap = await api('/api/state', { timeoutMs: 8000 });
     if (S.snap.battery) S.battery = S.snap.battery;
+    retryDelay = 4000;
     setLink(true);
     render();
+    // The server answers while cmux does not: keep asking, so the screen flips
+    // back on its own once cmux is open again.
+    if (!S.snap.online) scheduleRetry();
   } catch {
     setLink(false);
+    // A dead EventSource is not always a closed one; re-open it alongside.
+    if (S.es && S.es.readyState !== EventSource.OPEN) connectSSE();
+    scheduleRetry();
   }
 }
 
@@ -324,7 +502,7 @@ function render() {
   $('nav-feed').classList.toggle('active', S.route.name === 'feed');
   $('nav-settings').classList.toggle('active', S.route.name === 'settings');
 
-  setLink(linkUp); // the bar carries the link state and the battery on every view
+  paintLink(); // the bar carries the link state and the battery on every view
   if (S.route.name === 'home') {
     $('title').textContent = 'cmux mirroring';
     renderHome();
@@ -365,10 +543,10 @@ function wsRow(w) {
 
 function renderHome() {
   if (S.route.name !== 'home') return;
-  if (!S.snap) {
-    $('view').innerHTML = '<div class="empty">Connecting to Mac…</div>';
-    return;
-  }
+  // No link, or a Mac with cmux shut: there is no session list to draw and the
+  // status screen is the whole view. It used to be a permanent "Connecting to
+  // Mac…" that never resolved into an explanation.
+  if (paintStatus()) return;
   const grouped = new Set(S.snap.groups.flatMap((g) => g.workspaceIds));
   const byId = new Map(S.snap.workspaces.map((w) => [w.id, w]));
   let html = '';
@@ -384,6 +562,13 @@ function renderHome() {
   }
   const rest = S.snap.workspaces.filter((w) => !grouped.has(w.id));
   html += rest.map(wsRow).join('');
+  // cmux running with nothing open is a real state, and an empty screen with a
+  // lone button under it reads like something failed to load.
+  if (!S.snap.workspaces.length) {
+    html += `<div class="status"><div class="ico">🗂</div>
+      <div class="t">No workspaces open</div>
+      <div class="d">cmux is running with nothing in it.</div></div>`;
+  }
   html += '<button class="bigbtn secondary" id="new-ws">＋ New workspace</button>';
   const bodyRect = document.body.getBoundingClientRect();
   const sab = getComputedStyle(document.documentElement).getPropertyValue('--sab').trim();
@@ -403,12 +588,7 @@ function renderHome() {
     );
   }
   const newWs = $('new-ws');
-  if (newWs) {
-    newWs.onclick = () => {
-      const cwd = window.prompt('Folder for the new workspace:', '~/Documents/dev');
-      if (cwd !== null) wsAction({ action: 'newWorkspace', cwd: cwd.trim() || undefined });
-    };
-  }
+  if (newWs) newWs.onclick = () => newWorkspacePrompt(newWs);
 }
 
 // ---------------------------------------------------------------- workspace
@@ -497,6 +677,10 @@ function renderWs() {
     b.classList.toggle('active', b.dataset.tab === S.tab);
   }
   if (!w) {
+    // Opening a push notification with no link lands here, and "closed?" was a
+    // guess that happened to be wrong every time the real answer was "the Mac
+    // is asleep". Only claim the workspace is gone once we can see the list.
+    if (paintStatus()) return;
     $('view').innerHTML = '<div class="empty">Workspace not found (closed?).</div>';
     return;
   }
@@ -869,7 +1053,11 @@ async function pollGrid(force) {
     const fit = full ? 0 : paneFit();
     const sameShape = lastFullMode === full && lastFit === fit;
     const since = grid && rowsModel && sameShape ? `&since=${encodeURIComponent(grid.seq)}` : '';
-    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${full ? '&full=1' : `&fit=${fit}`}${since}`);
+    // A replay takes milliseconds; anything near this is the link, not cmux.
+    // Without the deadline the very first poll after opening a session over a
+    // dead link never settles, and the pane below stays blank for good instead
+    // of saying what went wrong.
+    const g = await api(`/api/grid?surface=${encodeURIComponent(S.surface)}${full ? '&full=1' : `&fit=${fit}`}${since}`, { timeoutMs: 10_000 });
     if (g.unchanged) {
       // Fresh view (e.g. after a tab switch) with an unchanged revision:
       // repaint from the cached model or the screen stays blank forever.
@@ -2007,7 +2195,11 @@ if ('serviceWorker' in navigator) {
   });
 }
 S.route = parseHash();
-refreshSnapshot().then(() => {
-  connectSSE();
-  render();
-});
+// Paint before asking anything. Waiting for the first snapshot meant the shell
+// sat on index.html's boot placeholder for as long as the Mac took to answer —
+// which, asleep, is forever. The app now shows its own "Connecting…" at once
+// and replaces it with a real status the moment it knows one.
+window.__cmuxBooted = true; // stands the watchdog in index.html down
+render();
+connectSSE();
+refreshSnapshot();

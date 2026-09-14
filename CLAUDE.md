@@ -29,6 +29,7 @@ node scripts/test-input-sync.mjs <surface-id>    # composer <-> field; point at 
 node scripts/test-shell-sync.mjs <workspace-id>  # shell prompt; creates and closes a scratch tab
 node scripts/test-files.mjs [workspace-id]       # file browser: listing, viewer, locked state
 node scripts/test-scroll.mjs <workspace-id>      # touch scrolling, headless Chromium
+node scripts/test-status.mjs                    # no link / cmux down / a link that hangs
 node scripts/smoke-browser.mjs <workspace-id> --type   # app loads; typing reaches the pty
 node scripts/dump-grid.mjs <surface-id>          # print the rows the parser sees
 ```
@@ -77,6 +78,29 @@ a row count as its second argument (default 14).
   takes whatever is on port 9333, so a leftover shell from an earlier run answers instead, with
   its old service-worker cache: tests then pass or fail against a build you are not editing.
   `pkill -f chrome-headless-shell` first; the app version in Settings tells you which build ran.
+- **The Mac fails by hanging, not by refusing.** Asleep or off the tailnet, it swallows the
+  connection instead of resetting it, so an un-raced `fetch` never settles and whatever waited
+  on it never updates. That is what made the app a blank dark rectangle: `sw.js` was
+  network-first with no deadline, so `/app.js` never arrived and nothing but the bare HTML
+  rendered. The shell now races the network against `SHELL_TIMEOUT_MS`, and `/api/state` and
+  `/api/grid` pass `timeoutMs` to `api()`. Anything new on the path to the first paint needs a
+  deadline too. `test-status.mjs` covers all of it — it stalls requests with CDP's `Fetch`
+  domain, because emulating *offline* makes them fail fast and tests the easy half.
+- **Closing a workspace can close its window, and no window means no ＋ New workspace.** A
+  cmux window dies with its last workspace, so "close everything from the phone" leaves zero
+  windows — and `cmux new-workspace` creates in *the caller's window*, which a launchd agent
+  does not have. It used to lean on cmux falling back to the current window, which works right
+  up until there isn't one. `createWorkspace` in `server.mjs` now names the window explicitly,
+  and with none falls back to the bare `cmux <path>` form — the only one that makes the window
+  and the workspace together, and starts cmux if it has to. Its argument is `path.resolve`d for
+  that reason: a relative `cwd` would be read as a subcommand.
+- **Starting cmux is not something the control socket can do** — by the time you need it there
+  is no socket. `launchApp()` shells out to `open -a`, which is also the only way a launchd
+  agent reaches a GUI app; `POST /api/cmux-launch` then waits for the socket, because `open`
+  returns long before cmux answers.
+- **`state.online` has to be able to go back to false.** cmux quitting announces nothing; the
+  RPCs simply start failing, and a flag only ever set on success leaves the phone with a green
+  dot over sessions that no longer exist.
 - **Never put literal ESC or DEL bytes in source** — write `\u001B` / `\u007F`. Literal control
   characters are invisible in diffs and break exact-match editing.
 - **Newlines are terminal-specific.** The Claude composer wants `shift+enter`; a shell wants

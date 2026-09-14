@@ -39,6 +39,7 @@ export async function launch({ port = 9333, width = 430, height = 900 } = {}) {
   let seq = 0;
   const waiting = new Map();
   const problems = [];
+  const listeners = new Map(); // CDP method -> [handler]
 
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
@@ -47,6 +48,7 @@ export async function launch({ port = 9333, width = 430, height = 900 } = {}) {
       waiting.delete(msg.id);
       return;
     }
+    for (const fn of listeners.get(msg.method) || []) fn(msg.params);
     if (msg.method === 'Runtime.exceptionThrown') {
       const d = msg.params.exceptionDetails;
       problems.push(`exception: ${d.exception?.description || d.text}`);
@@ -74,6 +76,10 @@ export async function launch({ port = 9333, width = 430, height = 900 } = {}) {
     send,
     evaluate,
     problems,
+    // Subscribe to a CDP event — Fetch.requestPaused, above all, which is the
+    // only way to make a request hang rather than fail. Those are two different
+    // outages and the app has to survive both.
+    on: (method, fn) => listeners.set(method, [...(listeners.get(method) || []), fn]),
     goto: (url) => send('Page.navigate', { url }),
     // xDistance/yDistance are positive to scroll left / up, per CDP.
     scroll: (x, y, xDistance, yDistance, speed = 800) => send('Input.synthesizeScrollGesture', {

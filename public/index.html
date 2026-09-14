@@ -240,6 +240,26 @@
     .group-kids { margin-left: 10px; }
     .empty { color: var(--dim); text-align: center; padding: 40px 20px; }
 
+    /* status screen — what stands in for the session list when there is nothing
+       to list: no link to the Mac, or a Mac that answers with cmux shut. Every
+       one of those used to be an empty pane, which on a phone is a black
+       rectangle you cannot tell from a crash. */
+    .status { text-align: center; padding: 34px 18px 20px; }
+    .status .ico { font-size: 38px; line-height: 1; height: 40px; }
+    .status .t { font-weight: 700; font-size: 17px; margin: 12px 0 6px; }
+    .status .d { color: var(--muted); font-size: 14px; }
+    .status ul { text-align: left; max-width: 330px; margin: 14px auto 0; padding-left: 22px; color: var(--muted); font-size: 13px; }
+    .status li { margin-bottom: 5px; }
+    .status code { background: #0b1120; border-radius: 4px; padding: 0 4px; font-size: 12px; }
+    .status .when { color: var(--dim); font-size: 12px; margin-top: 14px; }
+    .status .bigbtn { max-width: 330px; margin-left: auto; margin-right: auto; }
+    .status .spin {
+      display: inline-block; width: 26px; height: 26px; border-radius: 50%;
+      border: 3px solid var(--border); border-top-color: var(--accent);
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
     /* tab chips (cmux tabs AND splits — all treated as tabs here) */
     .chips { flex: none; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; -webkit-overflow-scrolling: touch; }
     .chips .chip { flex: none; display: flex; align-items: stretch; background: var(--card); border-radius: 8px; overflow: hidden; }
@@ -437,7 +457,17 @@
     <div class="up-track"><div class="up-fill" id="up-fill"></div></div>
   </div>
 
-  <main id="view"></main>
+  <!-- app.js replaces this on its first render. It is here because the shell
+       used to paint with an empty <main>: when /app.js never arrives — nothing
+       cached yet, or a link slow enough that the service worker gave up on it —
+       the phone showed a dark rectangle and said nothing at all. -->
+  <main id="view">
+    <div class="status" id="boot">
+      <div class="ico"><span class="spin"></span></div>
+      <div class="t">Starting…</div>
+      <div class="d">Loading the app.</div>
+    </div>
+  </main>
 
   <div id="composer">
     <div id="suggest"></div>
@@ -460,6 +490,58 @@
     <button data-route="#/settings" id="nav-settings">Settings</button>
   </nav>
 
+  <!-- Boot watchdog. Everything else in this app is in a module, and a module
+       that 404s, fails to parse, or is still in flight leaves no trace on
+       screen — no error, no console anyone can open from a phone. So the shell
+       watches for itself, and when the app has not taken over it asks the
+       server who is at fault: a Mac that is not answering needs a completely
+       different thing from the user than a build that will not load. -->
+  <script>
+    window.__cmuxBooted = false;
+
+    // Only offered when the server answers — with no link, the cache is the
+    // only copy of the app the phone has and clearing it strands you.
+    window.__cmuxReset = async function () {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      } catch { /* nothing cached */ }
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      } catch { /* never registered */ }
+      location.reload();
+    };
+
+    setTimeout(async function () {
+      const el = document.getElementById('boot');
+      if (window.__cmuxBooted || !el) return;
+
+      let server = null;
+      try {
+        const ctl = new AbortController();
+        const bell = setTimeout(() => ctl.abort(), 4000); // the Mac hangs, it does not refuse
+        const r = await fetch('/api/status', { signal: ctl.signal, cache: 'no-store' });
+        clearTimeout(bell);
+        if (r.ok) server = await r.json();
+      } catch { /* nothing is answering */ }
+      if (window.__cmuxBooted) return;
+
+      el.innerHTML = server
+        ? `<div class="ico">🧩</div>
+           <div class="t">The app didn't load</div>
+           <div class="d">The Mac is answering, but the app's own files did not arrive — usually a half-written cache.</div>
+           <button class="bigbtn" onclick="location.reload()">Reload</button>
+           <button class="bigbtn secondary" onclick="window.__cmuxReset()">Clear cache and reload</button>`
+        : `<div class="ico">📡</div>
+           <div class="t">Can't reach the Mac</div>
+           <div class="d">Nothing answered at ${location.host}.</div>
+           <ul><li>Is the Mac awake and on the tailnet?</li>
+               <li>Is Tailscale switched on, on this phone?</li>
+               <li>Is the cmux-mirroring agent running over there?</li></ul>
+           <button class="bigbtn secondary" onclick="location.reload()">Try again</button>`;
+    }, 5000);
+  </script>
   <script src="/app.js" type="module"></script>
 </body>
 </html>
