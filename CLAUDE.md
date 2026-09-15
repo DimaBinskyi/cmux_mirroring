@@ -30,6 +30,7 @@ node scripts/test-shell-sync.mjs <workspace-id>  # shell prompt; creates and clo
 node scripts/test-files.mjs [workspace-id]       # file browser: listing, viewer, locked state
 node scripts/test-scroll.mjs <workspace-id>      # touch scrolling, headless Chromium
 node scripts/test-status.mjs                    # no link / cmux down / a link that hangs
+node scripts/test-render.mjs [surface-id]       # the grid renderer, cell by cell against the old one
 node scripts/smoke-browser.mjs <workspace-id> --type   # app loads; typing reaches the pty
 node scripts/dump-grid.mjs <surface-id>          # print the rows the parser sees
 ```
@@ -78,6 +79,24 @@ a row count as its second argument (default 14).
   takes whatever is on port 9333, so a leftover shell from an earlier run answers instead, with
   its old service-worker cache: tests then pass or fail against a build you are not editing.
   `pkill -f chrome-headless-shell` first; the app version in Settings tells you which build ran.
+- **A repaint costs element count, not colour.** cmux emits one span per *word*, split by
+  column gaps rather than by style, so a plain line arrives as a dozen spans. `lineHtml`
+  rejoins runs sharing a `style_id` and refills the gaps with the spaces they stand for —
+  1015 elements to 137 on a 120-row pane, 2.6x off a repaint. Styles go in a stylesheet
+  (`#term-styles`, one `.tc<id>` rule each) rather than a `style=` attribute, which is worth
+  little in time but a third of the HTML; the point of it is knowing per id whether a span is
+  needed at all. Two invariants hold it together, both checked by `test-render.mjs`: a run may
+  only swallow a gap when its blank cells are indistinguishable from bare ones (`gapSafe` — no
+  background, no underline, no strike), and the merge happens **at render time only**.
+  `rowsModel` stays as cmux sent it because `term-input.mjs` derives per-character width from
+  `cell_width / text.length`, which a merge across a wide glyph would quietly falsify.
+- **`content-visibility` on the rows needs a stated width.** It skips layout for the off-screen
+  half of the pane (`PRELOAD_PANES` renders two panes' worth) and is the largest single saving
+  in a repaint — 6.6x together with the above. But a skipped row is not measured, so it reports
+  no width and the pane's horizontal scroll range collapses to zero. `#screen .tl` states
+  `calc(var(--term-cols) * 1ch)` instead, set by `paintGrid` from `grid.columns`; 1ch is exactly
+  one cell in a monospace font, so `scrollWidth` comes out identical. `test-scroll.mjs` is what
+  catches this — it failed with `maxLeft=0`.
 - **The Mac fails by hanging, not by refusing.** Asleep or off the tailnet, it swallows the
   connection instead of resetting it, so an un-raced `fetch` never settles and whatever waited
   on it never updates. That is what made the app a blank dark rectangle: `sw.js` was

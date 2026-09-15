@@ -324,7 +324,21 @@
     #gridrows { min-height: 100%; display: flex; flex-direction: column; justify-content: flex-end; }
     /* Rows must not shrink to fit the flex box, or an overflowing grid would
        squeeze instead of scroll. */
-    #screen .tl { white-space: pre; min-height: 1.35em; flex: none; }
+    /* The pane holds two panes' worth of rows (PRELOAD_PANES) so a flick up
+       lands on real text, which means roughly half of them are never on screen.
+       content-visibility lets the browser skip laying those out entirely — the
+       single largest saving in a repaint. Rows never wrap, so their height is
+       always exactly one line and the substituted size is not a guess.
+       Width has to be stated rather than measured, though: a skipped row is not
+       laid out, so it reports no width, and the pane's horizontal scroll range
+       collapses to nothing. paintGrid sets --term-cols from the grid, and 1ch is
+       exactly one cell in a monospace font, so the stated width is the real one. */
+    #screen .tl {
+      white-space: pre; min-height: 1.35em; flex: none;
+      width: calc(var(--term-cols, 80) * 1ch);
+      content-visibility: auto;
+      contain-intrinsic-height: auto 1.35em;
+    }
     #screen .tl.hitline { background: rgba(245, 158, 11, 0.28); border-radius: 3px; }
     #screen .tl.hitline.current { outline: 2px solid var(--warn); outline-offset: -1px; background: rgba(245, 158, 11, 0.45); }
     #jump-live {

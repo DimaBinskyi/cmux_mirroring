@@ -8,7 +8,7 @@ import {
 } from './term-input.mjs';
 import { createFileBrowser } from './files.mjs';
 
-const APP_VERSION = 'v63'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v64'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1074,11 +1074,18 @@ async function pollGrid(force) {
       quiet = prevLines !== null && !Object.keys(g.changed).length && sameCursor(grid.cursor, g.cursor);
       grid.seq = g.seq;
       grid.cursor = g.cursor;
+      // Rebuilding the stylesheet on every delta would undo the point of having
+      // one, and a delta carries styles for the rows it touched — almost always
+      // ids we already know.
+      for (const k of Object.keys(g.styles || {})) {
+        if (!sameStyle(grid.styles[k], g.styles[k])) stylesDirty = true;
+      }
       Object.assign(grid.styles, g.styles);
       for (const [i, spans] of Object.entries(g.changed)) rowsModel[Number(i)] = spans;
     } else {
       grid = g;
       rowsModel = buildRowsModel(g);
+      stylesDirty = true; // a fresh grid, possibly a different surface entirely
     }
     lastFullMode = full;
     lastFit = fit;
@@ -1091,23 +1098,101 @@ async function pollGrid(force) {
   }
 }
 
-function spanHtml(s, g) {
-  const st = g.styles[s.style_id] || {};
-  let fg = st.fg || g.fg;
-  let bg = st.bg;
-  if (st.inverse) {
-    const tmp = fg;
-    fg = bg || g.bg;
-    bg = tmp;
+// Styles arrive as a table of ids, so they belong in a stylesheet rather than in
+// a style attribute rebuilt for every span of every frame. One rule per id,
+// rewritten only when the table actually changes, turns each span into
+// class="tc7". Worth ~30% of the rendered HTML; the real win is what it enables
+// below, which is knowing per id whether a span is needed at all.
+let stylesDirty = true;
+let plainStyles = new Set(); // ids that add nothing over the pane's own colours
+let gapSafeStyles = new Set(); // ids whose blank cells look like bare ones
+
+const sameStyle = (a, b) => !!a && !!b && a.fg === b.fg && a.bg === b.bg && a.bold === b.bold
+  && a.faint === b.faint && a.inverse === b.inverse && a.italic === b.italic
+  && a.underline === b.underline && a.strike === b.strike;
+
+function syncStyleSheet() {
+  if (!stylesDirty || !grid) return;
+  stylesDirty = false;
+  const fgDefault = String(grid.fg || '').toLowerCase();
+  const bgDefault = String(grid.bg || '').toLowerCase();
+  const plain = new Set();
+  const gapSafe = new Set();
+  const rules = [];
+
+  for (const key of Object.keys(grid.styles || {})) {
+    const st = grid.styles[key] || {};
+    let fg = st.fg || grid.fg;
+    let bg = st.bg;
+    if (st.inverse) {
+      const tmp = fg;
+      fg = bg || grid.bg;
+      bg = tmp;
+    }
+    const paintsBg = !!bg && String(bg).toLowerCase() !== bgDefault;
+    const deco = [st.underline && 'underline', st.strike && 'line-through'].filter(Boolean).join(' ');
+    // A run may swallow the blank columns inside it only if its empty cells are
+    // indistinguishable from untouched ones. Colour and weight are invisible on
+    // a space; a background or an underline is not, and painting one across a
+    // gap cmux said nothing about would invent decoration.
+    if (!paintsBg && !deco) gapSafe.add(Number(key));
+
+    let css = `color:${fg};`;
+    if (paintsBg) css += `background:${bg};`;
+    if (st.bold) css += 'font-weight:700;';
+    if (st.faint) css += 'opacity:.6;';
+    if (st.italic) css += 'font-style:italic;';
+    if (deco) css += `text-decoration:${deco};`;
+    if (!paintsBg && !deco && !st.bold && !st.faint && !st.italic
+      && String(fg).toLowerCase() === fgDefault) plain.add(Number(key));
+    rules.push(`#screen .tc${key}{${css}}`);
   }
-  let css = `color:${fg};`;
-  if (bg && bg.toLowerCase() !== g.bg.toLowerCase()) css += `background:${bg};`;
-  if (st.bold) css += 'font-weight:700;';
-  if (st.faint) css += 'opacity:.6;';
-  if (st.italic) css += 'font-style:italic;';
-  const deco = [st.underline && 'underline', st.strike && 'line-through'].filter(Boolean).join(' ');
-  if (deco) css += `text-decoration:${deco};`;
-  return `<span style="${css}">${esc(s.text)}</span>`;
+
+  let sheet = $('term-styles');
+  if (!sheet) {
+    sheet = document.createElement('style');
+    sheet.id = 'term-styles';
+    document.head.appendChild(sheet);
+  }
+  sheet.textContent = rules.join('');
+  plainStyles = plain;
+  gapSafeStyles = gapSafe;
+}
+
+// cmux emits one span per word, split by column gaps rather than by style, so a
+// plain line of default-coloured text arrives as a dozen spans and used to leave
+// a dozen elements in the DOM. Element count is what a repaint costs — not the
+// styling — so runs sharing a style are rejoined here, gaps filled back in with
+// the spaces they stand for. Measured on a 120-row pane: 1015 spans to 142.
+//
+// Deliberately at render time and not in rowsModel: term-input.mjs reads that
+// model and derives per-character width from cell_width/text.length, which a
+// merge across a wide glyph would quietly falsify.
+function lineHtml(spans) {
+  let out = '';
+  let col = 0; // next column still to be written
+  let runId = -1;
+  let run = '';
+  const flush = () => {
+    if (!run) return;
+    out += plainStyles.has(runId) ? esc(run) : `<span class="tc${runId}">${esc(run)}</span>`;
+    run = '';
+  };
+  for (const s of spans) {
+    const width = s.cell_width || [...s.text].length;
+    const gap = s.column > col ? s.column - col : 0;
+    if (s.style_id === runId && run && (!gap || gapSafeStyles.has(runId))) {
+      run += ' '.repeat(gap); // same style, and the gap is safe to absorb
+    } else {
+      flush();
+      if (gap) out += ' '.repeat(gap); // bare cells belong to no span
+      runId = s.style_id;
+    }
+    run += s.text;
+    col = s.column + width;
+  }
+  flush();
+  return out || ' ';
 }
 
 let prevLines = null;
@@ -1138,17 +1223,11 @@ function paintGrid() {
   el.style.background = grid.bg;
   el.style.color = grid.fg;
   el.style.fontSize = `${termFont()}px`;
+  // Rows state their width instead of being measured — see #screen .tl.
+  el.style.setProperty('--term-cols', grid.columns);
 
-  const lines = rowsModel.map((spans) => {
-    let col = 0;
-    let line = '';
-    for (const s of spans) {
-      if (s.column > col) line += ' '.repeat(s.column - col);
-      line += spanHtml(s, grid);
-      col = s.column + (s.cell_width || [...s.text].length);
-    }
-    return line || ' ';
-  });
+  syncStyleSheet();
+  const lines = rowsModel.map(lineHtml);
 
   // Diff per line: typical updates touch a handful of rows, so patching only
   // those keeps repaints cheap and scroll/selection stable.
