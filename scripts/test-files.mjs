@@ -121,6 +121,75 @@ try {
   check('image loads through the key', img?.w === 192, img ? `${img.w}px` : 'no <img>');
   await b.evaluate(`document.getElementById('vw-close').click()`);
 
+  // ------------------------------------------------------------------ share
+  // Headless Chromium has no share sheet, so Web Share is stood in for: the
+  // stub records what it was handed, and can refuse the first call the way iOS
+  // does when a slow fetch has outlived the tap.
+  const stubShare = (refuseFirst = false) => b.evaluate(`(() => {
+    window.__shared = [];
+    window.__fileFetches = 0;
+    let refuse = ${refuseFirst};
+    const realFetch = window.__realFetch || (window.__realFetch = window.fetch);
+    window.fetch = (u, ...rest) => {
+      if (String(u).includes('/api/fs/file')) window.__fileFetches++;
+      return realFetch(u, ...rest);
+    };
+    Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => true });
+    Object.defineProperty(navigator, 'share', { configurable: true, value: async ({ files }) => {
+      if (refuse) { refuse = false; throw new DOMException('no activation', 'NotAllowedError'); }
+      const f = files[0];
+      window.__shared.push({ name: f.name, size: f.size, type: f.type, head: await f.slice(0, 40).text() });
+    } });
+  })()`);
+  const shared = () => b.evaluate(`({ shared: window.__shared, fetches: window.__fileFetches,
+    primary: document.getElementById('vw-share')?.classList.contains('primary') })`);
+  const tapShare = async () => {
+    await b.evaluate(`document.getElementById('vw-share')?.click()`);
+    await sleep(1000);
+  };
+
+  // A markdown file: the case that had no way off the phone at all.
+  await b.goto(`${BASE}/#/files/${encodeURIComponent(DIR)}`);
+  await sleep(1800);
+  await stubShare();
+  await clickRow('README.md');
+  await sleep(1500);
+  await tapShare();
+  const readme = fs.readFileSync(new URL('../README.md', import.meta.url));
+  const md = await shared();
+  check('a text file shares as itself', md.shared.length === 1 && md.shared[0].name === 'README.md'
+    && md.shared[0].size === readme.length && md.shared[0].head === readme.subarray(0, 40).toString(),
+  JSON.stringify(md.shared[0]));
+  check('…as text/plain', /^text\/plain/.test(md.shared[0]?.type), md.shared[0]?.type);
+  await b.evaluate(`document.getElementById('vw-close').click()`);
+
+  // An image, refused once: the second tap must share without fetching again.
+  await b.goto(`${BASE}/#/files/${encodeURIComponent(`${DIR}/public`)}`);
+  await sleep(1800);
+  await stubShare(true);
+  await clickRow('icon-192.png');
+  await sleep(1500);
+  await tapShare();
+  const refused = await shared();
+  check('a refused share leaves the button armed', refused.shared.length === 0 && refused.primary, JSON.stringify(refused));
+  await tapShare();
+  const again = await shared();
+  const png = fs.statSync(new URL('../public/icon-192.png', import.meta.url)).size;
+  check('the second tap shares the held file', again.shared.length === 1 && again.shared[0].size === png
+    && again.shared[0].type === 'image/png' && again.fetches === 1, JSON.stringify({ ...again.shared[0], fetches: again.fetches }));
+  await b.evaluate(`document.getElementById('vw-close').click()`);
+
+  // No Web Share for files: a download link takes the button's place.
+  await b.evaluate(`Object.defineProperty(navigator, 'canShare', { configurable: true, value: undefined })`);
+  await clickRow('icon-192.png');
+  await sleep(1500);
+  const fallback = await b.evaluate(`(() => ({
+    share: !!document.getElementById('vw-share'),
+    href: document.querySelector('.vw-bar a[download]')?.getAttribute('href') || '',
+  }))()`);
+  check('without Web Share it offers a download', !fallback.share && /download=1/.test(fallback.href), JSON.stringify(fallback));
+  await b.evaluate(`document.getElementById('vw-close').click()`);
+
   // ------------------------------------------------------------ wrong key
   await b.evaluate(`localStorage.setItem('cmux-fs-key', 'nope')`);
   await b.goto(`${BASE}/#/files/${encodeURIComponent(DIR)}`);

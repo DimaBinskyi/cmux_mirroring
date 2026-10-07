@@ -9,6 +9,7 @@
 
 const LINES_PAGE = 2000; // lines rendered per tap — a phone chokes well before a file does
 const LINE_MAX = 2000; // a minified bundle is one line; render it whole and Safari stops
+const SHARE_MAX = 100 * 1024 * 1024; // a shared file is held whole in the phone's memory first
 
 // Directories nobody opens a file browser to read. Shown, but dimmed, so a
 // directory of nothing but node_modules does not look like a wall of equals.
@@ -211,11 +212,13 @@ export function createFileBrowser({
   // One overlay for every kind: text pages in, media is a URL, and anything the
   // browser cannot make sense of shows its first kilobyte as hex.
   let doc = null;
+  let held = null; // { path, file } — what Share fetched, kept for a second tap
 
   function closeViewer() {
     viewer.hidden = true;
     viewer.innerHTML = ''; // also stops a playing video
     doc = null;
+    held = null;
   }
 
   async function openFile(full, entry) {
@@ -245,18 +248,69 @@ export function createFileBrowser({
       <button class="btn" id="vw-close">✕</button>
       <span class="vw-name">${esc(meta.name)} · ${fmtSize(meta.size)}</span>
       ${extra}
+      ${shareHtml(meta)}
       ${inSession() ? '<button class="btn" id="vw-insert" title="Put this path in the terminal input">＋ path</button>' : ''}
     </div>`;
   }
 
   function bindBar(meta) {
     viewer.querySelector('#vw-close').onclick = closeViewer;
+    const sh = viewer.querySelector('#vw-share');
+    if (sh) sh.onclick = () => share(meta, sh);
     const ins = viewer.querySelector('#vw-insert');
     if (ins) {
       ins.onclick = () => {
         insertPath(meta.path);
         closeViewer();
       };
+    }
+  }
+
+  // Share hands the file itself to the share sheet — AirDrop, Save to Files, a
+  // messenger. A link would be no use to anyone: it points into the tailnet and
+  // carries the key. Where Web Share cannot take a file (a desktop browser, or
+  // Chrome on Android, whose allowlist has no .md) or the file is too big to
+  // hold in memory, a plain download is the way out instead.
+  function shareHtml(meta) {
+    let can = false;
+    try {
+      can = meta.size <= SHARE_MAX && Boolean(navigator.canShare?.({ files: [new File([], meta.name)] }));
+    } catch { /* canShare throws on a type it dislikes rather than answering */ }
+    return can ? '<button class="btn" id="vw-share" title="Share this file">Share</button>'
+      : `<a class="btn" href="${fileUrl(meta.path, true)}" download title="Download">⤓</a>`;
+  }
+
+  async function share(meta, btn) {
+    if (btn.disabled) return; // the sheet refuses to open twice
+    btn.disabled = true;
+    const fetched = held?.path !== meta.path;
+    try {
+      if (fetched) {
+        btn.textContent = '…';
+        const resp = await fetch(fileUrl(meta.path));
+        if (!resp.ok) throw new Error(`the Mac answered ${resp.status}`);
+        const blob = await resp.blob();
+        // Everything that is not media arrives as text/plain (see lib/files.mjs);
+        // a zip labelled that way would be opened as text by whatever gets it.
+        const type = meta.kind === 'binary' ? 'application/octet-stream' : blob.type;
+        if (!viewer.contains(btn)) return; // closed, or another file opened, meanwhile
+        held = { path: meta.path, file: new File([blob], meta.name, { type }) };
+      }
+      btn.textContent = 'Share';
+      btn.classList.remove('primary');
+      await navigator.share({ files: [held.file] });
+    } catch (err) {
+      if (err.name === 'AbortError') return; // the sheet was dismissed
+      if (err.name === 'NotAllowedError' && fetched) {
+        // iOS opens the sheet only straight off a tap, and a slow fetch outlives
+        // it. The file is in hand now, so the next tap shares at once.
+        btn.classList.add('primary');
+        return;
+      }
+      btn.textContent = 'Share';
+      alert(`Could not share ${meta.name}: ${err.message}`);
+    } finally {
+      btn.disabled = false;
     }
   }
 
@@ -271,10 +325,7 @@ export function createFileBrowser({
           : meta.kind === 'pdf' ? `<iframe class="vw-pdf" src="${url}" title="${esc(meta.name)}"></iframe>`
             : `<div class="vw-hex">${esc(meta.hex || '')}</div>
                <div class="note">Not text — the first kilobyte, as bytes.</div>`;
-    // Downloading hands the file to iOS (Files app / share sheet) instead of
-    // trying to render something we cannot.
-    const extra = block ? `<a class="btn" href="${fileUrl(meta.path, true)}" download title="Download">⤓</a>` : '';
-    viewer.innerHTML = `${barHtml(meta, extra)}<div class="vw-body${block ? ' doc' : ''}">${body}</div>`;
+    viewer.innerHTML = `${barHtml(meta)}<div class="vw-body${block ? ' doc' : ''}">${body}</div>`;
     bindBar(meta);
     const media = viewer.querySelector('img, video, audio');
     if (media) {

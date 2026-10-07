@@ -64,7 +64,9 @@ works in any browser.
   toggle for long lines; images, video, audio and PDFs open as themselves, inside
   the viewer — never by navigating the app away from itself, which in a
   standalone PWA is a one-way trip. Anything else shows its first kilobyte as
-  hex, and ⤓ hands the file to iOS when the phone cannot render it. **＋ path**
+  hex. **Share**, on every file, hands the file itself to the iOS share sheet —
+  AirDrop, Save to Files, a messenger — and is a plain ⤓ download where the
+  browser cannot share files or the file is over 100 MB. **＋ path**
   puts a file's path in the terminal input and takes you to the Term tab, which
   is the point of browsing from here: you are usually looking for something to
   hand to the agent. Holding a row does the same without opening the file.

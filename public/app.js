@@ -8,7 +8,7 @@ import {
 } from './term-input.mjs';
 import { createFileBrowser } from './files.mjs';
 
-const APP_VERSION = 'v64'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v65'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
