@@ -8,7 +8,7 @@ import {
 } from './term-input.mjs';
 import { createFileBrowser } from './files.mjs';
 
-const APP_VERSION = 'v65'; // keep in sync with sw.js CACHE
+const APP_VERSION = 'v66'; // keep in sync with sw.js CACHE
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -184,6 +184,7 @@ function connStatus() {
   // opening and its first state frame. Calling that "cmux offline" flashed a
   // wrong answer on screen for the frame it lasts.
   if (!S.snap) return { cls: '', label: '', state: 'connecting' };
+  if (!S.snap.online && S.snap.stalled) return { cls: 'warn', label: 'cmux not answering', state: 'cmux-stalled' };
   if (!S.snap.online) return { cls: 'warn', label: 'cmux offline', state: 'no-cmux' };
   return { cls: 'ok', label: 'Connected', state: 'ok' };
 }
@@ -263,6 +264,19 @@ function statusHtml() {
       <button class="bigbtn secondary" id="status-new-ws">＋ Start it with a new workspace</button>
       <div class="when">If cmux <em>is</em> open on the Mac, socket control is off:
         <code>automation.socketControlMode</code> has to be <code>"password"</code>.</div>
+      ${seenHtml(S.snap?.lastOkAt, 'cmux last answered')}
+      <button class="bigbtn secondary" id="status-retry">Try again</button></div>`;
+  }
+  // Running, but too slow to answer — not the same as closed, and offering to
+  // start it would be wrong. macOS App Naps it when nobody can see its window,
+  // which a shut lid or a locked screen is enough for.
+  if (state === 'cmux-stalled') {
+    return `<div class="status"><div class="ico">💤</div>
+      <div class="t">cmux isn't answering</div>
+      <div class="d">cmux is running on the Mac, but has stopped replying in time. macOS throttles it while
+        the lid is closed or the screen is locked — opening it brings cmux back.</div>
+      <div class="when">To stop the throttling for good, run on the Mac:
+        <code>defaults write com.cmuxterm.app NSAppSleepDisabled -bool YES</code> and restart cmux.</div>
       ${seenHtml(S.snap?.lastOkAt, 'cmux last answered')}
       <button class="bigbtn secondary" id="status-retry">Try again</button></div>`;
   }

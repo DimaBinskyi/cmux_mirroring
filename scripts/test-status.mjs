@@ -53,11 +53,14 @@ try {
       await b.send('Fetch.failRequest', { requestId, errorReason: 'Failed' }).catch(() => {});
       return;
     }
-    if (mode === 'no-cmux') {
-      // The server is up and answering; cmux behind it is not.
+    if (mode === 'no-cmux' || mode === 'cmux-stalled') {
+      // The server is up and answering; cmux behind it is not — closed, or
+      // running but timing out.
       if (path === '/api/stream') return; // stall, so the SSE cannot contradict us
       if (path === '/api/state') {
-        const body = JSON.stringify({ online: false, lastOkAt: Date.now() - 300_000, groups: [], workspaces: [] });
+        const body = JSON.stringify({
+          online: false, stalled: mode === 'cmux-stalled', lastOkAt: Date.now() - 300_000, groups: [], workspaces: [],
+        });
         await b.send('Fetch.fulfillRequest', {
           requestId,
           responseCode: 200,
@@ -125,6 +128,18 @@ try {
     seen.some((s) => /\/api\/cmux-launch POST/.test(s)), clicked);
   check('cmux down: the button says it is working', /Starting/.test(label), clicked);
   await sleep(2000);
+
+  // ------------------------------------- cmux is there, but not answering
+  // What a shut lid looks like: App Nap throttles cmux until its calls time
+  // out. It used to read as "cmux isn't running" and offer to start it.
+  mode = 'cmux-stalled';
+  await b.send('Page.reload');
+  const stalled = await waitFor((t) => /isn't answering/.test(t), 20_000);
+  check('cmux stalled: says it is not answering, not that it is closed', stalled.ok && !/isn't running/.test(stalled.text), stalled.text);
+  check('cmux stalled: names the lid as the likely cause', /lid/.test(stalled.text), stalled.text);
+  const stalledBtns = await b.evaluate(`JSON.stringify([...document.querySelectorAll('#view button')].map((el) => el.id))`);
+  check('cmux stalled: does not offer to start a cmux that is running',
+    !JSON.parse(stalledBtns).includes('status-launch') && JSON.parse(stalledBtns).includes('status-retry'), stalledBtns);
 
   // ------------------------------------------------- a link that hangs open
   // The one that produced the black screen: network-first with no deadline

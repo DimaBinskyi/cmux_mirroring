@@ -26,6 +26,15 @@ import { resolveTranscript, newestTranscriptForCwd, parseTranscript } from './li
 import { PushService } from './lib/push.mjs';
 import * as files from './lib/files.mjs';
 
+// data/stderr.log is the only record of what happened while nobody was looking,
+// and an undated line cannot be lined up with anything — the phone's "last
+// answered", `pmset -g log`, macOS's own log. Local time, in the format those
+// two use.
+for (const name of ['log', 'error']) {
+  const write = console[name].bind(console);
+  console[name] = (...args) => write(new Date().toLocaleString('sv-SE'), ...args);
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DATA_DIR = path.join(__dirname, 'data');

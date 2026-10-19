@@ -202,7 +202,7 @@ Stop the foreground `node server.mjs` from step 3 first, or the launchd agent
 cannot bind the port. Check: `curl -s localhost:4488/api/status` still answers
 with `"cmuxOnline": true`, and
 `launchctl print gui/$(id -u)/com.cmux-mirroring | grep state` says running.
-Logs go to `data/stdout.log` and `data/stderr.log`.
+Logs go to `~/Library/Logs/cmux-mirroring/` (outside `~/Documents`, which launchd cannot open logs in).
 
 `cmuxOnline` flipping to `false` exactly here — true in step 3, false once
 launchd owns the process — is step 2 undone: the hand-started server was allowed
@@ -240,6 +240,15 @@ sudo pmset -a sleep 0    # never sleep on idle (the display may still sleep)
 
 On a MacBook that holds while the lid is open. Closing the lid sleeps it anyway
 unless it is on power with an external display attached.
+
+Awake is not enough for cmux itself. With the lid closed or the screen locked,
+nothing can see its window, so macOS puts it in App Nap — and it answers so
+slowly that the phone shows **cmux isn't answering**. Opt it out, then quit and
+reopen cmux:
+
+```sh
+defaults write com.cmuxterm.app NSAppSleepDisabled -bool YES
+```
 
 ### 6. HTTPS on the tailnet
 

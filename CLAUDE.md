@@ -11,7 +11,7 @@ old name "cmux-push".
 ```bash
 npm start                                                     # node server.mjs, binds 127.0.0.1:4488
 launchctl kickstart -k gui/$(id -u)/com.dmytro.cmux-mirroring # restart the installed agent
-tail -f data/stderr.log                                       # the agent's only output; launchd swallows it otherwise
+tail -f ~/Library/Logs/cmux-mirroring/stderr.log             # the agent's only output; launchd swallows it otherwise
 curl -s localhost:4488/api/state                              # workspace + surface ids
 ```
 
@@ -117,6 +117,13 @@ a row count as its second argument (default 14).
   is no socket. `launchApp()` shells out to `open -a`, which is also the only way a launchd
   agent reaches a GUI app; `POST /api/cmux-launch` then waits for the socket, because `open`
   returns long before cmux answers.
+- **A closed lid makes cmux slow, not gone.** With the screen locked or the lid shut, macOS
+  App Naps cmux and its socket calls start missing the 15s deadline. A timeout is reported
+  as `stalled` in the snapshot — "cmux isn't answering" on the phone, with no offer to start
+  a cmux that is running — and `NSAppSleepDisabled` on `com.cmuxterm.app` is the fix on the
+  Mac. cmux answers one connection's calls strictly in order, so one slow call holds up
+  everything queued behind it; that is why `feed.list` asks for `pending_only` (unfiltered
+  it is 2000 telemetry items, 1 MB, on every refresh).
 - **`state.online` has to be able to go back to false.** cmux quitting announces nothing; the
   RPCs simply start failing, and a flag only ever set on success leaves the phone with a green
   dot over sessions that no longer exist.
@@ -149,11 +156,15 @@ a row count as its second argument (default 14).
   `clearStall` (the client's "Try again" sends `retry=1`). Never add a `*Sync` fs call to
   that path — it would block the event loop instead of a pool thread. The real fix for a
   user is Full Disk Access for the node binary; `UV_THREADPOOL_SIZE=16` buys headroom.
+- **launchd cannot touch `~/Documents` on its own.** It `chdir`s into `WorkingDirectory` and opens
+  the log files *before* node starts, so Full Disk Access on node does not cover them: the agent
+  exits 78 (EX_CONFIG) with nothing logged. The installed plist therefore has no `WorkingDirectory`
+  (the server uses `__dirname`) and logs to `~/Library/Logs/cmux-mirroring/`. Node itself still
+  needs Full Disk Access to read the repo, and it must be re-granted when the node path changes.
 - **The launchd label installed here is `com.dmytro.cmux-mirroring`**, not the
   `com.cmux-mirroring` used in `cmux-mirroring.plist.example` and the README.
 - `data/` is gitignored and holds the VAPID keys, the file-browser key, push subscriptions,
-  `prefs.json`, the notification `feed.json`, `events-cursor`, the agent's `stdout.log` /
-  `stderr.log`, and uploads. Deleting it
+  `prefs.json`, the notification `feed.json`, `events-cursor`, older agent logs, and uploads. Deleting it
   re-keys push, and every phone has to subscribe again. `data/uploads/` is swept on a 30-day
   TTL (`sweepUploads`, at startup and daily), so paths in older transcripts stop resolving.
 
